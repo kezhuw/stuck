@@ -1,0 +1,23 @@
+[package]
+name = "stuck"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kezhu Wang <kezhuw@gmail.com>"]
+description = "Multi-threading scheduled task facility building on cooperative stackful coroutine"
+homepage = "https://github.com/kezhuw/stuck"
+repository = "https://github.com/kezhuw/stuck"
+documentation = "https://docs.rs/stuck"
+license = "MIT"
+keywords = ["concurrent", "concurrency", "stackful", "coroutine", "coroutines", "cooperative", "task"]
+categories = ["Concurrency"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libc = "0.2.109"
+lazy_static = "1.4.0"
+errno = "0.2.8"
+static_assertions = "1.1.0"
+
+[dev-dependencies]
+pretty_assertions = "1.2.0"
