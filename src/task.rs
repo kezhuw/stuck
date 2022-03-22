@@ -9,9 +9,9 @@ use std::{mem, ptr};
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
 use crate::coroutine::stack::StackSize;
-use crate::coroutine::Coroutine;
+use crate::coroutine::{self, Coroutine};
 use crate::error::{JoinError, PanicError};
-use crate::{coroutine, runtime};
+use crate::runtime::{self, Scheduler};
 
 static TID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -60,14 +60,22 @@ pub(crate) type FnMain = Box<dyn FnOnce()>;
 
 /// Builder for concurrent task.
 #[derive(Default)]
-pub struct Builder {
+pub struct Builder<'a> {
     stack_size: StackSize,
+    scheduler: Option<&'a Scheduler>,
 }
 
-impl Builder {
+// assert_not_impl_any!(Builder<'static>: Send);
+assert_impl_all!(Builder<'static>: Send);
+
+impl Builder<'_> {
     /// Constructs a new task builder.
-    pub fn new() -> Builder {
-        Builder { stack_size: StackSize::default() }
+    pub fn new() -> Builder<'static> {
+        Builder { stack_size: StackSize::default(), scheduler: None }
+    }
+
+    pub(crate) fn with_scheduler(scheduler: &Scheduler) -> Builder<'_> {
+        Builder { stack_size: StackSize::default(), scheduler: Some(scheduler) }
     }
 
     /// Specifies stack size for new task.
@@ -85,6 +93,7 @@ impl Builder {
         F: Send + 'static,
         T: Send + 'static,
     {
+        let scheduler = self.scheduler.or_else(Scheduler::try_current).expect("no runtime");
         let joint = SessionJoint::new();
         let handle = JoinHandle::new(joint.clone());
         let mut waker = SessionWaker::new(joint);
@@ -93,7 +102,7 @@ impl Builder {
             waker.set_result(result);
         });
         let task = Task::new(main, self.stack_size);
-        runtime::sched(task);
+        scheduler.sched(task);
         handle
     }
 }
