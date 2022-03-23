@@ -8,7 +8,7 @@ homepage = "https://github.com/kezhuw/stuck"
 repository = "https://github.com/kezhuw/stuck"
 documentation = "https://docs.rs/stuck"
 license = "MIT"
-keywords = ["concurrent", "concurrency", "stackful", "coroutine", "coroutines", "cooperative", "task"]
+keywords = ["concurrent", "coroutine", "task", "thread"]
 categories = ["Concurrency"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
