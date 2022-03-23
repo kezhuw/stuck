@@ -1,5 +1,10 @@
 # stuck
 
+[![crates.io](https://img.shields.io/crates/v/stuck?style=for-the-badge)](https://crates.io/crates/stuck)
+[![docs.rs](https://img.shields.io/docsrs/stuck?style=for-the-badge)](https://docs.rs/stuck)
+[![github-ci](https://img.shields.io/github/workflow/status/kezhuw/stuck/CI?style=for-the-badge)](https://github.com/kezhuw/stuck/actions)
+[![mit-license](https://img.shields.io/github/license/kezhuw/stuck?style=for-the-badge)](LICENSE)
+
 Stuck is a multi-threading scheduled task facility building on cooperative stackful coroutine.
 
 ## Examples
