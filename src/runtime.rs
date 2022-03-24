@@ -2,21 +2,24 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 use std::{ptr, thread};
 
 use ignore_result::Ignore;
 
-use crate::task::{self, Task};
+use crate::task::{self, SchedFlow, Task};
 
 thread_local! {
     static SCHEDULER: Cell<Option<ptr::NonNull<Scheduler>>> = Cell::new(None);
 }
 
+const STOP_MSG: &str = "runtime stopped";
+
 struct TaskPointer(ptr::NonNull<Task>);
 
 unsafe impl Send for TaskPointer {}
 
-impl From<&Task> for TaskPointer {
+impl TaskPointer {
     fn from(task: &Task) -> TaskPointer {
         TaskPointer(ptr::NonNull::from(task))
     }
@@ -91,11 +94,25 @@ impl Drop for Runtime {
     }
 }
 
+struct SchedulerState {
+    runq: VecDeque<TaskPointer>,
+    registry: HashMap<u64, Arc<Task>>,
+
+    // -1: running
+    //  0: start stopping
+    // +n: n stopped threads
+    stopped: isize,
+}
+
+impl SchedulerState {
+    fn new() -> Self {
+        SchedulerState { runq: VecDeque::with_capacity(256), registry: HashMap::with_capacity(256), stopped: -1 }
+    }
+}
+
 pub(crate) struct Scheduler {
     parallelism: usize,
-    tasks: Mutex<HashMap<u64, Arc<Task>>>,
-    runq: Mutex<VecDeque<TaskPointer>>,
-    stopped: Cell<bool>,
+    state: Mutex<SchedulerState>,
     waker: Condvar,
 }
 
@@ -105,13 +122,7 @@ unsafe impl Sync for Scheduler {}
 impl Scheduler {
     fn new() -> Arc<Scheduler> {
         let parallelism = thread::available_parallelism().unwrap_or(NonZeroUsize::new(4).unwrap()).get();
-        Arc::new(Scheduler {
-            parallelism,
-            tasks: Mutex::new(HashMap::new()),
-            runq: Mutex::new(VecDeque::new()),
-            waker: Condvar::new(),
-            stopped: Cell::new(false),
-        })
+        Arc::new(Scheduler { parallelism, state: Mutex::new(SchedulerState::new()), waker: Condvar::new() })
     }
 
     /// Starts threads to serve spawned tasks.
@@ -126,10 +137,9 @@ impl Scheduler {
     }
 
     fn stop(&self) {
-        let locker = self.runq.lock().unwrap();
-        self.stopped.set(true);
+        let mut state = self.state.lock().unwrap();
+        state.stopped = 0;
         self.waker.notify_all();
-        drop(locker);
     }
 
     pub(crate) unsafe fn current<'a>() -> &'a Scheduler {
@@ -141,53 +151,63 @@ impl Scheduler {
     }
 
     pub fn sched(&self, t: Arc<Task>) {
-        let t = self.register(t);
-        self.resume(unsafe { t.as_ref() });
-    }
-
-    pub(crate) fn resume(&self, t: &Task) {
-        let mut tasks = self.runq.lock().unwrap();
-        tasks.push_back(TaskPointer::from(t));
-        drop(tasks);
+        let mut state = self.state.lock().unwrap();
+        let id = t.id();
+        let pointer = TaskPointer::from(&t);
+        state.registry.insert(id, t);
+        state.runq.push_back(pointer);
         self.waker.notify_one();
     }
 
-    pub(crate) fn retire(&self, t: &Task) {
-        let id = t.id();
-        let mut tasks = self.tasks.lock().unwrap();
-        tasks.remove(&id);
-    }
-
-    fn register(&self, task: Arc<Task>) -> ptr::NonNull<Task> {
-        let id = task.id();
-        let p = unsafe { ptr::NonNull::new_unchecked(Arc::as_ptr(&task) as *mut Task) };
-        let mut map = self.tasks.lock().unwrap();
-        map.insert(id, task);
-        p
+    pub(crate) fn resume(&self, t: &Task) {
+        let mut state = self.state.lock().unwrap();
+        state.runq.push_back(TaskPointer::from(t));
+        self.waker.notify_one();
     }
 
     fn serve(&self) {
         let _scope = Scope::enter(self);
-        let mut tasks = self.runq.lock().unwrap();
-        while !self.stopped.get() {
-            if let Some(mut task) = tasks.pop_front() {
-                drop(tasks);
+        let mut state = self.state.lock().unwrap();
+        while state.stopped < 0 {
+            if let Some(mut task) = state.runq.pop_front() {
+                drop(state);
                 let task = unsafe { task.0.as_mut() };
-                Task::run(task);
-                tasks = self.runq.lock().unwrap();
+                let flow = task.sched();
+                let id = task.id();
+                state = self.state.lock().unwrap();
+                match flow {
+                    SchedFlow::Yield => state.runq.push_back(TaskPointer::from(task)),
+                    SchedFlow::Block => {},
+                    SchedFlow::Cease => {
+                        state.registry.remove(&id);
+                    },
+                }
             } else {
-                tasks = self.waker.wait(tasks).unwrap();
+                state = self.waker.wait(state).unwrap();
             }
         }
+        let stopped = state.stopped + 1;
+        state.stopped = stopped;
+        if stopped as usize != self.parallelism {
+            return;
+        }
+        // This is the last scheduling thread.
+        while !state.registry.is_empty() {
+            // SAFETY: Avoid compilation warning in read to `registry` and write to `runq`.
+            let registry: &HashMap<u64, Arc<Task>> = unsafe { std::mem::transmute::<_, _>(&state.registry) };
+            registry.values().filter(|t| t.grab()).map(|t| TaskPointer::from(t)).for_each(|t| state.runq.push_back(t));
+            while let Some(mut task) = state.runq.pop_front() {
+                drop(state);
+                let task = unsafe { task.0.as_mut() };
+                let id = task.id();
+                task.abort(STOP_MSG);
+                state = self.state.lock().unwrap();
+                state.registry.remove(&id);
+            }
+            drop(state);
+            // Sleep to let waker resume task after winning Task::grab(eg. `running` state).
+            std::thread::sleep(Duration::from_millis(500));
+            state = self.state.lock().unwrap();
+        }
     }
-}
-
-pub(crate) fn resume(t: &Task) {
-    let scheduler = unsafe { Scheduler::current() };
-    scheduler.resume(t);
-}
-
-pub(crate) fn retire(t: &Task) {
-    let scheduler = unsafe { Scheduler::current() };
-    scheduler.retire(t);
 }

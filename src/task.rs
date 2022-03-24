@@ -11,7 +11,7 @@ use static_assertions::{assert_impl_all, assert_not_impl_any};
 use crate::coroutine::stack::StackSize;
 use crate::coroutine::{self, Coroutine};
 use crate::error::{JoinError, PanicError};
-use crate::runtime::{self, Scheduler};
+use crate::runtime::Scheduler;
 
 static TID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -159,10 +159,10 @@ impl Drop for Task {
 unsafe impl Sync for Task {}
 unsafe impl Send for Task {}
 
-enum ResumeFlow {
+pub(crate) enum SchedFlow {
     Yield,
     Block,
-    Break,
+    Cease,
 }
 
 impl Task {
@@ -248,7 +248,7 @@ impl Task {
         }
     }
 
-    fn abort(&mut self, msg: &'static str) {
+    pub fn abort(&mut self, msg: &'static str) {
         self.aborting = true;
         loop {
             self.interrupt(msg);
@@ -262,15 +262,13 @@ impl Task {
         self.spawned_coroutines.drain(..).for_each(Self::drop_coroutine);
     }
 
-    pub fn run(task: &mut Task) {
-        match task.execute() {
-            ResumeFlow::Block => {},
-            ResumeFlow::Yield => runtime::resume(task),
-            ResumeFlow::Break => runtime::retire(task),
-        }
+    // Grab this task to runq. Return false if waker win.
+    pub fn grab(&self) -> bool {
+        let _locker = self.unblocking_coroutines.lock().unwrap();
+        !self.running.replace(true)
     }
 
-    fn execute(&mut self) -> ResumeFlow {
+    pub fn sched(&mut self) -> SchedFlow {
         let _scope = Scope::enter(self);
         self.running_coroutines.extend(self.spawned_coroutines.drain(..));
         self.running_coroutines.extend(self.yielding_coroutines.drain(..));
@@ -284,16 +282,16 @@ impl Task {
             }
         }
         if !self.yielding_coroutines.is_empty() {
-            ResumeFlow::Yield
+            SchedFlow::Yield
         } else if self.blocking_coroutines.is_empty() {
             if !self.suspending_coroutines.is_empty() {
                 self.abort("deadlock suspending coroutines");
             }
-            ResumeFlow::Break
+            SchedFlow::Cease
         } else if self.unblock(true) {
-            ResumeFlow::Yield
+            SchedFlow::Yield
         } else {
-            ResumeFlow::Block
+            SchedFlow::Block
         }
     }
 
