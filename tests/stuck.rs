@@ -1,3 +1,5 @@
+use std::sync::mpsc;
+
 use pretty_assertions::assert_eq;
 use stuck::runtime::Runtime;
 use stuck::{coroutine, task};
@@ -36,6 +38,20 @@ fn test_task_session_no_wakeup() {
         task::spawn(move || drop(waker));
         session.wait()
     });
+    assert_eq!(5, five.join().unwrap());
+}
+
+#[test]
+fn test_task_session_waked_by_thread() {
+    let runtime = Runtime::new();
+    let (sender, receiver) = mpsc::sync_channel::<task::SessionWaker<i32>>(1);
+    let five = runtime.spawn(move || {
+        let (session, waker) = task::session::<i32>();
+        sender.send(waker).unwrap();
+        session.wait()
+    });
+    let waker = receiver.recv().unwrap();
+    waker.wake(5);
     assert_eq!(5, five.join().unwrap());
 }
 

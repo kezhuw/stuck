@@ -50,12 +50,6 @@ impl Drop for Scope {
     }
 }
 
-fn wake(task: &Task, co: ptr::NonNull<Coroutine>, panicking: Option<&'static str>) {
-    if task.wake(co, panicking) {
-        runtime::resume(task);
-    }
-}
-
 pub(crate) type FnMain = Box<dyn FnOnce()>;
 
 /// Builder for concurrent task.
@@ -347,7 +341,7 @@ enum SessionState<T: Send + 'static> {
     Empty,
     Value(T),
     Panicked(Box<dyn Any + Send + 'static>),
-    TaskJoining { task: Weak<Task>, coroutine: ptr::NonNull<Coroutine> },
+    TaskJoining { scheduler: ptr::NonNull<Scheduler>, task: Weak<Task>, coroutine: ptr::NonNull<Coroutine> },
     ThreadJoining,
 }
 
@@ -376,9 +370,13 @@ impl<T: Send + 'static> SessionJoint<T> {
         state = mem::replace(&mut *locked, state);
         drop(locked);
         match state {
-            SessionState::TaskJoining { task, coroutine } => {
+            SessionState::TaskJoining { scheduler, task, coroutine } => {
                 if let Some(task) = task.upgrade() {
-                    wake(&task, coroutine, None);
+                    if task.wake(coroutine, None) {
+                        // SAFETY: scheduler lives longer than task
+                        let scheduler = unsafe { scheduler.as_ref() };
+                        scheduler.resume(&task);
+                    }
                 }
             },
             SessionState::ThreadJoining => {
@@ -426,7 +424,8 @@ impl<T: Send + 'static> SessionJoint<T> {
         let weak = Arc::downgrade(&strong);
         mem::forget(strong);
         let co = coroutine::current();
-        *locked = SessionState::TaskJoining { task: weak, coroutine: co };
+        let scheduler = unsafe { ptr::NonNull::from(Scheduler::current()) };
+        *locked = SessionState::TaskJoining { scheduler, task: weak, coroutine: co };
         co
     }
 
