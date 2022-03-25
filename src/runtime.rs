@@ -45,6 +45,31 @@ impl Drop for Scope {
     }
 }
 
+/// Builder for [Runtime].
+#[derive(Default)]
+pub struct Builder {
+    parallelism: Option<usize>,
+}
+
+impl Builder {
+    /// Specifies the number of parallel threads for scheduling.
+    pub fn parallelism(&mut self, n: usize) -> &mut Self {
+        assert!(n > 0, "parallelism must not be zero");
+        self.parallelism = Some(n);
+        self
+    }
+
+    /// Constructs an [Runtime] to spawn and schedule tasks.
+    pub fn build(&mut self) -> Runtime {
+        let parallelism = self
+            .parallelism
+            .unwrap_or_else(|| thread::available_parallelism().unwrap_or(NonZeroUsize::new(4).unwrap()).get());
+        let scheduler = Scheduler::new(parallelism);
+        let scheduling_threads = Scheduler::start(&scheduler);
+        Runtime { scheduler, scheduling_threads }
+    }
+}
+
 /// Runtime encapsulates io selecter, timer and task scheduler to serve spawned tasks.
 ///
 /// [Runtime::drop] will stop and join all serving threads.
@@ -56,9 +81,7 @@ pub struct Runtime {
 impl Runtime {
     /// Constructs an runtime to serve spawned tasks.
     pub fn new() -> Runtime {
-        let scheduler = Scheduler::new();
-        let scheduling_threads = Scheduler::start(&scheduler);
-        Runtime { scheduler, scheduling_threads }
+        Builder::default().build()
     }
 
     /// Constructs a task builder to spawn task.
@@ -120,8 +143,7 @@ unsafe impl Send for Scheduler {}
 unsafe impl Sync for Scheduler {}
 
 impl Scheduler {
-    fn new() -> Arc<Scheduler> {
-        let parallelism = thread::available_parallelism().unwrap_or(NonZeroUsize::new(4).unwrap()).get();
+    fn new(parallelism: usize) -> Arc<Scheduler> {
         Arc::new(Scheduler { parallelism, state: Mutex::new(SchedulerState::new()), waker: Condvar::new() })
     }
 
@@ -209,5 +231,48 @@ impl Scheduler {
             std::thread::sleep(Duration::from_millis(500));
             state = self.state.lock().unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    thread_local! {
+        static LOCAL_SECRET: Cell<usize> = Cell::new(0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn runtime_builder_parallelism_zero() {
+        Builder::default().parallelism(0).build();
+    }
+
+    #[test]
+    fn runtime_builder_parallelism_one() {
+        let runtime = Builder::default().parallelism(1).build();
+        let secret = 333;
+        let set_secret = runtime.spawn(move || {
+            thread::sleep(Duration::from_secs(10));
+            LOCAL_SECRET.with(|cell| cell.set(secret));
+        });
+        let get_secret = runtime.spawn(move || LOCAL_SECRET.with(|cell| cell.get()));
+        set_secret.join().unwrap();
+        assert_eq!(secret, get_secret.join().unwrap());
+    }
+
+    #[test]
+    fn runtime_builder_parallelism_multiple() {
+        let runtime = Builder::default().parallelism(2).build();
+        let secret = 111;
+        let set_secret = runtime.spawn(move || {
+            thread::sleep(Duration::from_secs(10));
+            LOCAL_SECRET.with(|cell| cell.set(secret));
+        });
+        let get_secret = runtime.spawn(move || LOCAL_SECRET.with(|cell| cell.get()));
+        set_secret.join().unwrap();
+        assert_ne!(secret, get_secret.join().unwrap());
     }
 }
