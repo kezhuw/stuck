@@ -14,6 +14,8 @@ use crate::coroutine::{self, Coroutine};
 use crate::error::{JoinError, PanicError};
 use crate::runtime::Scheduler;
 
+pub mod mpsc;
+
 static TID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
