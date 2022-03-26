@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `runtime::Builder` to customize `Runtime` construction.
 - Add `task::yield_now` and `coroutine::yield_now`.
 - Add mpsc channels `task::mpsc::bounded` and `task::mpsc::unbounded`.
+- Timer and `time::sleep`.
 
 ### Fixed
 - Enforce `Send`, `Sync` restriction for `Session` and `SessionWaker`.
