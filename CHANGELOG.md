@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Add `runtime::Builder` to customize `Runtime` construction.
+- Add `task::yield_now` and `coroutine::yield_now`.
+
+### Fixed
+- Enforce `Send`, `Sync` restriction for `Session` and `SessionWaker`.
 
 ## [0.1.1] - 2022-02-24
 ### Fixed
