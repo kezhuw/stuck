@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::cell::{Cell, UnsafeCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -361,8 +362,18 @@ enum SessionState<T: Send + 'static> {
 
 struct SessionJoint<T: Send + 'static> {
     state: Mutex<SessionState<T>>,
+
+    // - Use Option to avoid create os resource if not needed.
+    // - Use `UnsafeCell` to construct one if necessary.
+    // - Store it outside state so we can access it after unlocking.
     condvar: UnsafeCell<Option<Condvar>>,
 }
+
+// SAFETY: There are two immutable accessors.
+unsafe impl<T: Send> Sync for SessionJoint<T> {}
+
+// SAFETY: Normally, two immutable accessors are distributed to different tasks or threads.
+unsafe impl<T: Send> Send for SessionJoint<T> {}
 
 impl<T: Send + 'static> SessionJoint<T> {
     fn new() -> Arc<Self> {
@@ -474,22 +485,36 @@ impl<T: Send + 'static> SessionJoint<T> {
 /// Session provides method to block current coroutine until waking by [SessionWaker].
 pub struct Session<T: Send + 'static> {
     joint: Arc<SessionJoint<T>>,
+    marker: PhantomData<NotSendable>,
 }
 
 /// SessionWaker provides method to wake associated [Session].
 pub struct SessionWaker<T: Send + 'static> {
     joint: Arc<SessionJoint<T>>,
     waked: bool,
+    marker: PhantomData<Sendable>,
 }
 
-unsafe impl<T: Send> Send for SessionWaker<T> {}
+struct NotSendable(std::rc::Rc<()>);
+assert_not_impl_any!(NotSendable: Send, Sync);
 
-assert_impl_all!(SessionWaker<()>: Send);
-assert_not_impl_any!(Session<()>: Send);
+struct Sendable(std::rc::Rc<()>);
+unsafe impl Send for Sendable {}
+assert_impl_all!(Sendable: Send);
+assert_not_impl_any!(Sendable: Sync);
+
+// SessionWaker should be able to send across tasks and threads.
+assert_impl_all!(SessionWaker<Sendable>: Send);
+
+// SessionWaker should owned by only one task or thread.
+assert_not_impl_any!(SessionWaker<Sendable>: Sync);
+
+// Session should be used only be producing task or thread.
+assert_not_impl_any!(Session<Sendable>: Send, Sync);
 
 impl<T: Send + 'static> Session<T> {
     fn new(joint: Arc<SessionJoint<T>>) -> Session<T> {
-        Session { joint }
+        Session { joint, marker: PhantomData }
     }
 
     /// Waits peer to wake it.
@@ -514,7 +539,7 @@ impl<T: Send> Drop for SessionWaker<T> {
 
 impl<T: Send> SessionWaker<T> {
     fn new(joint: Arc<SessionJoint<T>>) -> SessionWaker<T> {
-        SessionWaker { joint, waked: false }
+        SessionWaker { joint, waked: false, marker: PhantomData }
     }
 
     /// Wakes peer.
