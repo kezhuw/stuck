@@ -282,3 +282,36 @@ where
     task.spawn(f, StackSize::default());
     handle
 }
+
+/// Yields coroutine for next scheduling cycle.
+pub fn yield_now() {
+    let t = unsafe { task::current().as_mut() };
+    let co = current();
+    t.yield_coroutine(co);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use pretty_assertions::assert_eq;
+
+    use crate::coroutine;
+    use crate::runtime::Runtime;
+
+    #[test]
+    fn yield_now() {
+        let runtime = Runtime::new();
+        let five = runtime.spawn(|| {
+            let value = Rc::new(Cell::new(0));
+            let shared_value = value.clone();
+            coroutine::spawn(move || {
+                shared_value.as_ref().set(5);
+            });
+            coroutine::yield_now();
+            value.as_ref().get()
+        });
+        assert_eq!(5, five.join().unwrap());
+    }
+}

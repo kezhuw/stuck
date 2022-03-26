@@ -131,6 +131,8 @@ pub(crate) struct Task {
 
     aborting: bool,
 
+    yielding: bool,
+
     // Newly spawned coroutines.
     spawned_coroutines: Vec<ptr::NonNull<Coroutine>>,
 
@@ -179,6 +181,7 @@ impl Task {
             main: co,
             running: Cell::new(true),
             aborting: false,
+            yielding: false,
             spawned_coroutines: vec![co],
             running_coroutines: VecDeque::with_capacity(5),
             yielding_coroutines: Vec::with_capacity(5),
@@ -273,7 +276,7 @@ impl Task {
         self.running_coroutines.extend(self.spawned_coroutines.drain(..));
         self.running_coroutines.extend(self.yielding_coroutines.drain(..));
         self.unblock(false);
-        while !self.spawned_coroutines.is_empty() || !self.running_coroutines.is_empty() {
+        while !(self.yielding || (self.spawned_coroutines.is_empty() && self.running_coroutines.is_empty())) {
             while let Some(co) = self.spawned_coroutines.pop() {
                 self.run_coroutine(co);
             }
@@ -281,6 +284,7 @@ impl Task {
                 self.run_coroutine(co);
             }
         }
+        self.yielding = false;
         if !self.yielding_coroutines.is_empty() {
             SchedFlow::Yield
         } else if self.blocking_coroutines.is_empty() {
@@ -313,6 +317,18 @@ impl Task {
         self.blocking_coroutines.insert(co);
         let co = unsafe { co.as_mut() };
         co.suspend();
+    }
+
+    pub fn yield_coroutine(&mut self, mut co: ptr::NonNull<Coroutine>) {
+        self.yielding_coroutines.push(co);
+        let co = unsafe { co.as_mut() };
+        co.suspend();
+    }
+
+    fn yield_task(&mut self) {
+        self.yielding = true;
+        let co = coroutine::current();
+        self.yield_coroutine(co);
     }
 
     fn wake(&self, co: ptr::NonNull<Coroutine>, panicking: Option<&'static str>) -> bool {
@@ -528,6 +544,12 @@ where
     (session, session_waker)
 }
 
+/// Yields task for next scheduling cycle.
+pub fn yield_now() {
+    let t = unsafe { current().as_mut() };
+    t.yield_task();
+}
+
 /// Spawns a concurrent task and returns a [JoinHandle] for it.
 ///
 /// The given fn serves as `main` in spawned task. All other coroutines in that task will be
@@ -539,4 +561,40 @@ where
     T: Send + 'static,
 {
     Builder::new().spawn(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use pretty_assertions::assert_eq;
+
+    use crate::runtime::Builder;
+    use crate::{coroutine, task};
+
+    #[test]
+    fn yield_now() {
+        let runtime = Builder::default().parallelism(1).build();
+        let five = runtime.spawn(|| {
+            let shared_value = Arc::new(Mutex::new(0));
+            let shared_task_value = shared_value.clone();
+            let shared_coroutine_value = shared_value.clone();
+            coroutine::spawn(move || {
+                let mut value = shared_coroutine_value.lock().unwrap();
+                if *value == 0 {
+                    *value = 6;
+                }
+            });
+            task::spawn(move || {
+                let mut value = shared_task_value.lock().unwrap();
+                if *value == 0 {
+                    *value = 5;
+                }
+            });
+            task::yield_now();
+            let value = shared_value.lock().unwrap();
+            *value
+        });
+        assert_eq!(5, five.join().unwrap());
+    }
 }
