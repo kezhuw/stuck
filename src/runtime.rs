@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
+use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -7,7 +8,9 @@ use std::{ptr, thread};
 
 use ignore_result::Ignore;
 
+use crate::task::mpsc::{self, Sender};
 use crate::task::{self, SchedFlow, Task};
+use crate::time;
 
 thread_local! {
     static SCHEDULER: Cell<Option<ptr::NonNull<Scheduler>>> = Cell::new(None);
@@ -64,9 +67,17 @@ impl Builder {
         let parallelism = self
             .parallelism
             .unwrap_or_else(|| thread::available_parallelism().unwrap_or(NonZeroUsize::new(4).unwrap()).get());
-        let scheduler = Scheduler::new(parallelism);
+        let (time_sender, time_receiver) = mpsc::unbounded(512);
+        let scheduler = Scheduler::new(parallelism, time_sender.clone());
+        let timer = time::Timer::new();
+        task::Builder::with_scheduler(&scheduler).spawn(move || {
+            time::timer(timer, time_receiver);
+        });
+        let ticker = thread::spawn(move || {
+            time::tick(time_sender);
+        });
         let scheduling_threads = Scheduler::start(&scheduler);
-        Runtime { scheduler, scheduling_threads }
+        Runtime { scheduler, ticker: MaybeUninit::new(ticker), scheduling_threads }
     }
 }
 
@@ -75,6 +86,7 @@ impl Builder {
 /// [Runtime::drop] will stop and join all serving threads.
 pub struct Runtime {
     scheduler: Arc<Scheduler>,
+    ticker: MaybeUninit<thread::JoinHandle<()>>,
     scheduling_threads: Vec<thread::JoinHandle<()>>,
 }
 
@@ -114,6 +126,8 @@ impl Drop for Runtime {
         for handle in self.scheduling_threads.drain(..) {
             handle.join().ignore();
         }
+        let ticker = unsafe { ptr::read(self.ticker.as_ptr()) };
+        ticker.join().ignore();
     }
 }
 
@@ -135,6 +149,7 @@ impl SchedulerState {
 
 pub(crate) struct Scheduler {
     parallelism: usize,
+    timer: Sender<time::Message>,
     state: Mutex<SchedulerState>,
     waker: Condvar,
 }
@@ -143,8 +158,8 @@ unsafe impl Send for Scheduler {}
 unsafe impl Sync for Scheduler {}
 
 impl Scheduler {
-    fn new(parallelism: usize) -> Arc<Scheduler> {
-        Arc::new(Scheduler { parallelism, state: Mutex::new(SchedulerState::new()), waker: Condvar::new() })
+    fn new(parallelism: usize, timer: Sender<time::Message>) -> Arc<Scheduler> {
+        Arc::new(Scheduler { parallelism, timer, state: Mutex::new(SchedulerState::new()), waker: Condvar::new() })
     }
 
     /// Starts threads to serve spawned tasks.
@@ -170,6 +185,10 @@ impl Scheduler {
 
     pub(crate) fn try_current<'a>() -> Option<&'a Scheduler> {
         SCHEDULER.with(|s| s.get().map(|s| unsafe { s.as_ref() }))
+    }
+
+    pub(crate) fn try_time_sender() -> Option<Sender<time::Message>> {
+        Self::try_current().map(|s| s.timer.clone())
     }
 
     pub fn sched(&self, t: Arc<Task>) {
@@ -214,6 +233,9 @@ impl Scheduler {
             return;
         }
         // This is the last scheduling thread.
+        drop(state);
+        self.timer.clone().send(time::Message::Stop).ignore();
+        state = self.state.lock().unwrap();
         while !state.registry.is_empty() {
             // SAFETY: Avoid compilation warning in read to `registry` and write to `runq`.
             let registry: &HashMap<u64, Arc<Task>> = unsafe { std::mem::transmute::<_, _>(&state.registry) };

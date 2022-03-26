@@ -43,6 +43,7 @@ pub mod coroutine;
 mod error;
 pub mod runtime;
 pub mod task;
+pub mod time;
 
 pub use coroutine::stack::StackSize;
 pub use error::JoinError;
