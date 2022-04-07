@@ -101,12 +101,34 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
     result.into()
 }
 
+/// Executes marked main function in configured runtime.
+///
+/// ## Options
+/// * `parallelism`: positive integer to specify parallelism for runtime scheduler
+///
+/// ## Examples
+/// ```rust
+/// #[stuck::main]
+/// fn main() {
+///     stuck::task::yield_now();
+/// }
+/// ```
+///
+/// ```rust
+/// #[stuck::main(parallelism = 1)]
+/// fn main() {
+///     stuck::task::yield_now();
+/// }
+/// ```
 #[cfg(not(test))]
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     generate(false, attr, item)
 }
 
+/// Executes marked test function in configured runtime.
+///
+/// See [macro@main] for configurable options.
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     generate(true, attr, item)
