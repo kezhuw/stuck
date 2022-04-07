@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 use std::{ptr, thread};
 
@@ -70,14 +70,14 @@ impl Builder {
         let (time_sender, time_receiver) = mpsc::unbounded(512);
         let scheduler = Scheduler::new(parallelism, time_sender.clone());
         let timer = time::Timer::new();
-        task::Builder::with_scheduler(&scheduler).spawn(move || {
+        let timer = task::Builder::with_scheduler(&scheduler).spawn(move || {
             time::timer(timer, time_receiver);
         });
         let ticker = thread::spawn(move || {
             time::tick(time_sender);
         });
         let scheduling_threads = Scheduler::start(&scheduler);
-        Runtime { scheduler, ticker: MaybeUninit::new(ticker), scheduling_threads }
+        Runtime { scheduler, timer: MaybeUninit::new(timer), ticker: MaybeUninit::new(ticker), scheduling_threads }
     }
 }
 
@@ -86,6 +86,7 @@ impl Builder {
 /// [Runtime::drop] will stop and join all serving threads.
 pub struct Runtime {
     scheduler: Arc<Scheduler>,
+    timer: MaybeUninit<task::JoinHandle<()>>,
     ticker: MaybeUninit<thread::JoinHandle<()>>,
     scheduling_threads: Vec<thread::JoinHandle<()>>,
 }
@@ -123,11 +124,14 @@ impl Default for Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.scheduler.stop();
+        let timer = unsafe { ptr::read(self.timer.as_ptr()) };
+        let ticker = unsafe { ptr::read(self.ticker.as_ptr()) };
+        timer.join().ignore();
+        ticker.join().ignore();
+        self.scheduler.stop();
         for handle in self.scheduling_threads.drain(..) {
             handle.join().ignore();
         }
-        let ticker = unsafe { ptr::read(self.ticker.as_ptr()) };
-        ticker.join().ignore();
     }
 }
 
@@ -173,9 +177,11 @@ impl Scheduler {
             .collect()
     }
 
+    /// This method is designed to be called twice. One for stop signal and one after all attendant
+    /// threads stopped.
     fn stop(&self) {
         let mut state = self.state.lock().unwrap();
-        state.stopped = 0;
+        state.stopped += 1;
         self.waker.notify_all();
     }
 
@@ -206,26 +212,31 @@ impl Scheduler {
         self.waker.notify_one();
     }
 
+    fn run<'a>(&'a self, mut state: MutexGuard<'a, SchedulerState>) -> MutexGuard<'a, SchedulerState> {
+        if let Some(mut task) = state.runq.pop_front() {
+            drop(state);
+            let task = unsafe { task.0.as_mut() };
+            let flow = task.sched();
+            let id = task.id();
+            state = self.state.lock().unwrap();
+            match flow {
+                SchedFlow::Yield => state.runq.push_back(TaskPointer::from(task)),
+                SchedFlow::Block => {},
+                SchedFlow::Cease => {
+                    state.registry.remove(&id);
+                },
+            }
+            state
+        } else {
+            self.waker.wait(state).unwrap()
+        }
+    }
+
     fn serve(&self) {
         let _scope = Scope::enter(self);
         let mut state = self.state.lock().unwrap();
         while state.stopped < 0 {
-            if let Some(mut task) = state.runq.pop_front() {
-                drop(state);
-                let task = unsafe { task.0.as_mut() };
-                let flow = task.sched();
-                let id = task.id();
-                state = self.state.lock().unwrap();
-                match flow {
-                    SchedFlow::Yield => state.runq.push_back(TaskPointer::from(task)),
-                    SchedFlow::Block => {},
-                    SchedFlow::Cease => {
-                        state.registry.remove(&id);
-                    },
-                }
-            } else {
-                state = self.waker.wait(state).unwrap();
-            }
+            state = self.run(state)
         }
         let stopped = state.stopped + 1;
         state.stopped = stopped;
@@ -236,6 +247,9 @@ impl Scheduler {
         drop(state);
         self.timer.clone().send(time::Message::Stop).ignore();
         state = self.state.lock().unwrap();
+        while state.stopped == self.parallelism as isize {
+            state = self.run(state)
+        }
         while !state.registry.is_empty() {
             // SAFETY: Avoid compilation warning in read to `registry` and write to `runq`.
             let registry: &HashMap<u64, Arc<Task>> = unsafe { std::mem::transmute::<_, _>(&state.registry) };
