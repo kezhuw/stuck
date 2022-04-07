@@ -86,7 +86,7 @@ fn test_coroutine_suspension_no_wakeup() {
 }
 
 #[test]
-fn test_example() {
+fn test_twenty() {
     let runtime = Runtime::new();
     let twenty = runtime.spawn(|| {
         let five_coroutine = coroutine::spawn(|| 5);

@@ -9,12 +9,11 @@ Stuck is a multi-threading scheduled task facility building on cooperative stack
 
 ## Examples
 ```rust
-use stuck::runtime::Runtime;
 use stuck::{coroutine, task};
 
+#[stuck::main]
 fn main() {
-    let runtime = Runtime::new();
-    let twenty = runtime.spawn(|| {
+    let twenty = task::spawn(|| {
         let five_coroutine = coroutine::spawn(|| 5);
 
         let (suspension, resumption) = coroutine::suspension::<i32>();

@@ -1,3 +1,5 @@
+#![allow(clippy::needless_doctest_main)]
+
 //! # Multi-threading task facility building on cooperative stackful coroutine
 //! `stuck` provides a multi-threading runtime to serve lightweight concurrent tasks where you can
 //! use [coroutine::suspension] to cooperatively resume suspending coroutines.
@@ -19,24 +21,25 @@
 //!
 //! ## Example
 //! ```rust
-//! use stuck::runtime::Runtime;
 //! use stuck::{coroutine, task};
 //!
-//! let runtime = Runtime::new();
-//! let twenty = runtime.spawn(|| {
-//!     let five_coroutine = coroutine::spawn(|| 5);
+//! #[stuck::main]
+//! fn main() {
+//!     let twenty = task::spawn(|| {
+//!         let five_coroutine = coroutine::spawn(|| 5);
 //!
-//!     let (suspension, resumption) = coroutine::suspension::<i32>();
-//!     coroutine::spawn(move || resumption.resume(5));
+//!         let (suspension, resumption) = coroutine::suspension::<i32>();
+//!         coroutine::spawn(move || resumption.resume(5));
 //!
-//!     let five_task = task::spawn(|| 5);
+//!         let five_task = task::spawn(|| 5);
 //!
-//!     let (session, waker) = task::session::<i32>();
-//!     task::spawn(move || waker.wake(5));
+//!         let (session, waker) = task::session::<i32>();
+//!         task::spawn(move || waker.wake(5));
 //!
-//!     session.wait() + suspension.suspend() + five_coroutine.join().unwrap() + five_task.join().unwrap()
-//! });
-//! assert_eq!(20, twenty.join().unwrap());
+//!         session.wait() + suspension.suspend() + five_coroutine.join().unwrap() + five_task.join().unwrap()
+//!     });
+//!     println!("twenty.join().unwrap(): {}", twenty.join().unwrap());
+//! }
 //! ```
 
 pub mod coroutine;
@@ -47,3 +50,6 @@ pub mod time;
 
 pub use coroutine::stack::StackSize;
 pub use error::JoinError;
+#[cfg(not(test))]
+pub use stuck_macros::main;
+pub use stuck_macros::test;
