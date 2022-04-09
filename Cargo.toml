@@ -19,6 +19,8 @@ lazy_static = "1.4.0"
 errno = "0.2.8"
 static_assertions = "1.1.0"
 ignore-result = "0.2.0"
+slab = "0.4.6"
+mio = { version= "0.8.2", features= ["net", "os-poll"] }
 stuck-macros = { version ="0.1.3", path = "macros" }
 
 [dev-dependencies]

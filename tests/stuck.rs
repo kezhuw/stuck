@@ -103,3 +103,41 @@ fn test_twenty() {
     });
     assert_eq!(20, twenty.join().unwrap());
 }
+
+#[stuck::test]
+fn tcp_echo() {
+    use std::io::{Read, Write};
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+
+    use stuck::net;
+
+    let mut listener = net::TcpListener::bind(SocketAddr::from_str("127.0.0.1:0").unwrap()).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let port = addr.port();
+
+    task::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        drop(listener);
+        let mut buf: [u8; 16] = Default::default();
+        loop {
+            match stream.read(&mut buf).unwrap() {
+                0 => break,
+                n => stream.write_all(&buf[..n]).unwrap(),
+            }
+        }
+    });
+
+    let mut stream = net::TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).unwrap();
+    let str = "Hi!";
+    stream.write_all(str.as_bytes()).unwrap();
+    stream.shutdown_write().unwrap();
+
+    let mut buf = Vec::with_capacity(str.len());
+    unsafe { buf.set_len(str.len()) };
+    stream.read_exact(&mut buf).unwrap();
+    drop(stream);
+
+    let echo = std::str::from_utf8(&buf).unwrap();
+    assert_eq!(str, echo);
+}
