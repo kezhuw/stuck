@@ -118,7 +118,7 @@ impl Timer {
             time >>= TIME_LEAST_SHIFT;
             let mut level = 0;
             loop {
-                let value = time & TIME_LEAST_MASK;
+                let value = time & TIME_LEVEL_MASK;
                 if value != 0 {
                     let index = (value - 1) as usize;
                     let list = self.level[level][index].clear();
@@ -261,6 +261,7 @@ mod tests {
     #[test_case(111, TIME_LEAST_MASK*2 + 333)]
     #[test_case(111, TIME_LEAST_MASK*3 + 333)]
     #[test_case(111, TIME_LEAST_MASK*4 + 333)]
+    #[test_case(TIME_LEAST_VALUE*TIME_LEVEL_VALUE, TIME_LEAST_VALUE)]
     fn sleep(time: u64, timeout: u64) {
         let mut timer = Timer::new();
         timer.update(time);
@@ -287,6 +288,7 @@ mod tests {
     #[test_case(111, TIME_LEAST_MASK)]
     #[test_case(111, TIME_LEAST_VALUE)]
     #[test_case(111, TIME_LEAST_MASK*2 + 333)]
+    #[test_case(TIME_LEAST_VALUE*TIME_LEVEL_VALUE, TIME_LEAST_VALUE)]
     fn sleep_blocking(time: u64, timeout: u64) {
         let mut timer = Timer::new();
         timer.update(time);
