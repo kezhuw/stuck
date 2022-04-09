@@ -1,6 +1,6 @@
 [package]
 name = "stuck"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Kezhu Wang <kezhuw@gmail.com>"]
 description = "Multi-threading scheduled task facility building on cooperative stackful coroutine"
