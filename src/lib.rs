@@ -44,6 +44,7 @@
 
 pub mod coroutine;
 mod error;
+pub mod net;
 pub mod runtime;
 pub mod task;
 pub mod time;

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 - `Sender::try_send` to send without blocking current execution.
+- Network io poller and tcp support.
 
 ### Fixed
 - Out of bounds in timer ticking.
