@@ -6,9 +6,27 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use crate::task::{self, SessionWaker};
 
+enum SendError<T> {
+    Closed(T),
+}
+
+/// Error for [Sender::try_send].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TrySendError<T> {
+    Full(T),
+    Closed(T),
+}
+
+impl<T> From<SendError<T>> for TrySendError<T> {
+    fn from(err: SendError<T>) -> Self {
+        let SendError::Closed(value) = err;
+        TrySendError::Closed(value)
+    }
+}
+
 enum Waiter<T: Send + 'static> {
-    Task { waker: SessionWaker<Result<(), T>>, value: T },
-    Thread { waker: Arc<ThreadWaker<T>>, value: T },
+    Task { waker: SessionWaker<Result<(), SendError<T>>>, value: T },
+    Thread { waker: Arc<ThreadWaker<SendError<T>>>, value: T },
 }
 
 struct ThreadWaker<T> {
@@ -58,9 +76,9 @@ impl<T: Send + 'static> State<T> {
         self.closed = true;
         for waiter in self.senders.drain(..) {
             match waiter {
-                Waiter::Task { waker, value } => waker.wake(Err(value)),
+                Waiter::Task { waker, value } => waker.wake(Err(SendError::Closed(value))),
                 Waiter::Thread { waker, value } => {
-                    unsafe { waker.wake(Err(value)) };
+                    unsafe { waker.wake(Err(SendError::Closed(value))) };
                 },
             }
         }
@@ -140,10 +158,10 @@ impl<T: Send + 'static> Channel<T> {
         }
     }
 
-    fn send(&self, value: T) -> Result<(), T> {
+    fn send(&self, trying: bool, value: T) -> Result<(), TrySendError<T>> {
         let mut state = self.state.lock().unwrap();
         if state.closed {
-            return Err(value);
+            return Err(TrySendError::Closed(value));
         } else if state.deque.is_empty() {
             state.deque.push_back(value);
             self.wake_receiver(state);
@@ -151,12 +169,14 @@ impl<T: Send + 'static> Channel<T> {
         } else if !state.is_full() {
             state.deque.push_back(value);
             return Ok(());
+        } else if trying {
+            return Err(TrySendError::Full(value));
         } else if task::task().is_some() {
-            let (session, waker) = task::session::<Result<(), T>>();
+            let (session, waker) = task::session::<Result<(), SendError<T>>>();
             let waiter = Waiter::Task { waker, value };
             state.senders.push_back(waiter);
             drop(state);
-            return session.wait();
+            return Ok(session.wait()?);
         }
         let waker = ThreadWaker::new();
         state.senders.push_back(Waiter::Thread { waker: waker.clone(), value });
@@ -164,7 +184,8 @@ impl<T: Send + 'static> Channel<T> {
             state = waker.condvar.wait(state).unwrap();
             let result = unsafe { &mut *waker.result.get() };
             if let Some(result) = result.take() {
-                return result;
+                result?;
+                return Ok(());
             }
         }
     }
@@ -180,7 +201,16 @@ impl<T: Send + 'static> Sender<T> {
     ///
     /// This operation could block if channel is full.
     pub fn send(&mut self, value: T) -> Result<(), T> {
-        self.channel.send(value)
+        match self.channel.send(false, value) {
+            Ok(_) => Ok(()),
+            Err(TrySendError::Closed(value)) => Err(value),
+            Err(TrySendError::Full(_)) => unreachable!("channel is full in sending"),
+        }
+    }
+
+    /// Attempts to send a value to receiver peer without blocking current execution.
+    pub fn try_send(&mut self, value: T) -> Result<(), TrySendError<T>> {
+        self.channel.send(true, value)
     }
 }
 
@@ -276,6 +306,54 @@ mod tests {
     #[should_panic]
     fn bounded_zero() {
         bounded::<()>(0);
+    }
+
+    fn channel_send(mut sender: Sender<i32>, mut receiver: Receiver<i32>) {
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+        assert_eq!(1, receiver.recv().unwrap());
+        assert_eq!(2, receiver.recv().unwrap());
+        drop(receiver);
+
+        assert_eq!(sender.send(3).unwrap_err(), 3);
+        assert_eq!(sender.try_send(6).unwrap_err(), TrySendError::Closed(6));
+    }
+
+    #[test]
+    fn bounded_send() {
+        let (sender, receiver) = bounded::<i32>(2);
+        channel_send(sender, receiver);
+    }
+
+    #[test]
+    fn unbounded_send() {
+        let (sender, receiver) = unbounded::<i32>(2);
+        channel_send(sender, receiver);
+    }
+
+    #[test]
+    fn bounded_try_send_full() {
+        let (mut sender, mut receiver) = bounded::<i32>(2);
+        sender.try_send(1).unwrap();
+        sender.try_send(2).unwrap();
+        assert_eq!(sender.try_send(3).unwrap_err(), TrySendError::Full(3));
+        drop(sender);
+        assert_eq!(1, receiver.recv().unwrap());
+        assert_eq!(2, receiver.recv().unwrap());
+        assert_eq!(None, receiver.recv());
+    }
+
+    #[test]
+    fn unbounded_try_send() {
+        let (mut sender, mut receiver) = unbounded::<i32>(1);
+        sender.try_send(1).unwrap();
+        sender.try_send(2).unwrap();
+        sender.try_send(3).unwrap();
+        drop(sender);
+        assert_eq!(1, receiver.recv().unwrap());
+        assert_eq!(2, receiver.recv().unwrap());
+        assert_eq!(3, receiver.recv().unwrap());
+        assert_eq!(None, receiver.recv());
     }
 
     #[test]
