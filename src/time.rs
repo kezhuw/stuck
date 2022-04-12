@@ -2,9 +2,10 @@ use std::mem::{forget, replace, MaybeUninit};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use crate::channel::parallel::{Receiver, Sender};
+use crate::channel::prelude::*;
 use crate::coroutine;
 use crate::runtime::Scheduler;
-use crate::task::mpsc::{Receiver, Sender};
 use crate::task::{self, SessionWaker};
 
 const TIME_LEAST_SHIFT: usize = 14;
@@ -197,14 +198,30 @@ impl std::fmt::Debug for Message {
     }
 }
 
-pub(crate) fn tick(mut sender: Sender<Message>) {
+static mut RAND: u64 = 0;
+
+/// Random but not well distributed integer.
+pub(crate) unsafe fn rand() -> u64 {
+    RAND
+}
+
+fn init_rand(now: Instant) {
+    let zero: Instant = unsafe { std::mem::zeroed() };
+    let rand = now.saturating_duration_since(zero).as_millis() as u64;
+    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    unsafe { RAND = rand.wrapping_add(epoch).wrapping_add(RAND) };
+}
+
+pub(crate) fn tickr(mut sender: Sender<Message>) {
     let mut time = 0;
     let start = Instant::now();
+    init_rand(start);
     loop {
         std::thread::sleep(Duration::from_millis(1));
         let elapsed = start.elapsed().as_millis() as u64;
         if elapsed > time {
             time = elapsed;
+            unsafe { RAND = time.wrapping_add(RAND) };
             if sender.send(Message::UpdateTime { time }).is_err() {
                 break;
             }
@@ -215,7 +232,8 @@ pub(crate) fn tick(mut sender: Sender<Message>) {
 pub(crate) fn timer(mut timer: Box<Timer>, mut receiver: Receiver<Message>) {
     while let Some(message) = receiver.recv() {
         match message {
-            Message::Timeout { timeout, session } => timer.timeout(timeout, session),
+            // Plus one minimum resolution to avoid earlier wakeup due to partially elapsed tick.
+            Message::Timeout { timeout, session } => timer.timeout(timeout + 1, session),
             Message::UpdateTime { time } => timer.update(time),
             Message::Stop => receiver.close(),
         }

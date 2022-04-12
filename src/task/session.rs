@@ -118,7 +118,6 @@ impl<T: Send + 'static> SessionJoint<T> {
         })
     }
 
-    #[cfg(test)]
     fn is_ready(&self) -> bool {
         let status = self.status();
         matches!(status, SessionStatus::Value | SessionStatus::Joined)
@@ -275,7 +274,7 @@ impl<T: Send + 'static> SessionJoint<T> {
         }
     }
 
-    fn wake(&self, value: T) -> Result<(), T> {
+    pub fn wake(&self, value: T) -> Result<(), T> {
         match self.set_value(SessionValue::Value(value)) {
             Err(value) => Err(unsafe { value.into_value() }),
             Ok(task) => {
@@ -367,6 +366,14 @@ impl<T: Send + 'static> SessionJoint<T> {
             self.join_on_thread()
         }
     }
+
+    pub(super) fn wait(&self) -> T {
+        match self.join() {
+            Ok(value) => value,
+            Err(PanicError::Static(s)) => panic::panic_any(s),
+            Err(PanicError::Unwind(err)) => panic::resume_unwind(err),
+        }
+    }
 }
 
 /// Session provides method to block current coroutine until waking by [SessionWaker].
@@ -409,6 +416,11 @@ impl<T: Send + 'static> Session<T> {
         joint
     }
 
+    /// Checks readiness.
+    pub fn is_ready(&self) -> bool {
+        self.joint.is_ready()
+    }
+
     /// Waits peer to wake it.
     ///
     /// # Panics
@@ -422,11 +434,7 @@ impl<T: Send + 'static> Session<T> {
     /// This means that no value linger after panic.
     pub fn wait(self) -> T {
         let joint = unsafe { self.into_joint() };
-        match joint.join() {
-            Ok(value) => value,
-            Err(PanicError::Static(s)) => panic::panic_any(s),
-            Err(PanicError::Unwind(err)) => panic::resume_unwind(err),
-        }
+        joint.wait()
     }
 }
 
@@ -462,9 +470,9 @@ impl<T: Send> SessionWaker<T> {
     }
 
     /// Wakes peer.
-    pub fn wake(self, value: T) {
+    pub fn wake(self, value: T) -> bool {
         let joint = unsafe { self.into_joint() };
-        joint.wake(value).ignore();
+        joint.wake(value).is_ok()
     }
 
     /// Sends and wakes peer if not waked.

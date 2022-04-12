@@ -10,13 +10,14 @@ use mio::{net, Interest, Token, Waker};
 use slab::Slab;
 
 pub use self::tcp::{TcpListener, TcpReader, TcpStream, TcpWriter};
-use crate::task::mpsc;
+use crate::channel::parallel;
+use crate::channel::prelude::*;
 
 const WAKER_TOKEN: Token = Token(usize::MAX);
 
 enum Entry {
-    Reader { readable: mpsc::Sender<()> },
-    Stream { readable: mpsc::Sender<()>, writable: mpsc::Sender<()> },
+    Reader { readable: parallel::Sender<()> },
+    Stream { readable: parallel::Sender<()>, writable: parallel::Sender<()> },
 }
 
 pub(crate) struct Registry {
@@ -41,8 +42,8 @@ impl Registry {
         entries.remove(token.0);
     }
 
-    fn register_tcp_listener(&self, listener: &mut net::TcpListener) -> io::Result<mpsc::Receiver<()>> {
-        let (readable_sender, readable_receiver) = mpsc::bounded(2);
+    fn register_tcp_listener(&self, listener: &mut net::TcpListener) -> io::Result<parallel::Receiver<()>> {
+        let (readable_sender, readable_receiver) = parallel::bounded(2);
         let token = self.register_entry(Entry::Reader { readable: readable_sender });
         match self.registry.register(listener, token, Interest::READABLE) {
             Ok(_) => Ok(readable_receiver),
@@ -53,9 +54,12 @@ impl Registry {
         }
     }
 
-    fn register_tcp_stream(&self, stream: &mut net::TcpStream) -> io::Result<(mpsc::Receiver<()>, mpsc::Receiver<()>)> {
-        let (readable_sender, readable_receiver) = mpsc::bounded(2);
-        let (writable_sender, writable_receiver) = mpsc::bounded(2);
+    fn register_tcp_stream(
+        &self,
+        stream: &mut net::TcpStream,
+    ) -> io::Result<(parallel::Receiver<()>, parallel::Receiver<()>)> {
+        let (readable_sender, readable_receiver) = parallel::bounded(2);
+        let (writable_sender, writable_receiver) = parallel::bounded(2);
         let token = self.register_entry(Entry::Stream { readable: readable_sender, writable: writable_sender });
         match self.registry.register(stream, token, Interest::READABLE.add(Interest::WRITABLE)) {
             Ok(_) => Ok((readable_receiver, writable_receiver)),
@@ -66,13 +70,13 @@ impl Registry {
         }
     }
 
-    fn check_readable(readable: &mut mpsc::Sender<()>, event: &Event) {
+    fn check_readable(readable: &mut parallel::Sender<()>, event: &Event) {
         if event.is_readable() || event.is_error() || event.is_read_closed() {
             readable.try_send(()).ignore();
         }
     }
 
-    fn check_writable(writable: &mut mpsc::Sender<()>, event: &Event) {
+    fn check_writable(writable: &mut parallel::Sender<()>, event: &Event) {
         if event.is_writable() || event.is_error() || event.is_write_closed() {
             writable.try_send(()).ignore();
         }
