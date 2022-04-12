@@ -21,27 +21,47 @@
 //!
 //! ## Example
 //! ```rust
-//! use stuck::{coroutine, task};
+//! use std::time::Duration;
+//!
+//! use stuck::channel::parallel;
+//! use stuck::channel::prelude::*;
+//! use stuck::{select, task, time};
 //!
 //! #[stuck::main]
 //! fn main() {
-//!     let twenty = task::spawn(|| {
-//!         let five_coroutine = coroutine::spawn(|| 5);
+//!     let (mut task_sender, task_receiver) = parallel::bounded(1);
+//!     let (mut response_sender, mut response_receiver) = parallel::bounded(1);
 //!
-//!         let (suspension, resumption) = coroutine::suspension::<i32>();
-//!         coroutine::spawn(move || resumption.resume(5));
-//!
-//!         let five_task = task::spawn(|| 5);
-//!
-//!         let (session, waker) = task::session::<i32>();
-//!         task::spawn(move || waker.wake(5));
-//!
-//!         session.wait() + suspension.suspend() + five_coroutine.join().unwrap() + five_task.join().unwrap()
+//!     task::spawn(move || {
+//!         for value in task_receiver.into_iter() {
+//!             time::sleep(Duration::from_secs(1));
+//!             response_sender.send(value - 1).unwrap();
+//!         }
 //!     });
-//!     println!("twenty.join().unwrap(): {}", twenty.join().unwrap());
+//!
+//!     let mut tasks = vec![6, 6, 6, 6];
+//!
+//!     let mut sum = 0;
+//!     while !response_receiver.is_drained() {
+//!         select! {
+//!             r = <-response_receiver => {
+//!                 if let Some(n) = r {
+//!                     sum += n;
+//!                 }
+//!             },
+//!             _ = task_sender<-tasks.pop().unwrap(), if !tasks.is_empty() => {
+//!                 if tasks.is_empty() {
+//!                     task_sender.close();
+//!                 }
+//!             },
+//!         }
+//!     }
+//!     println!("sum: {}", sum);
+//!     assert_eq!(sum, 20);
 //! }
 //! ```
 
+pub mod channel;
 pub mod coroutine;
 mod error;
 pub mod net;

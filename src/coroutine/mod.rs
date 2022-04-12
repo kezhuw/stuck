@@ -1,3 +1,5 @@
+//! Cooperative coroutines in task.
+
 mod context;
 mod page_size;
 pub(crate) mod stack;
@@ -144,7 +146,6 @@ impl<T> SuspensionJoint<T> {
         Rc::new(SuspensionJoint { state: UnsafeCell::new(SuspensionState::Empty), wakers: Cell::new(1) })
     }
 
-    #[cfg(test)]
     fn is_ready(&self) -> bool {
         let state = unsafe { &*self.state.get() };
         matches!(state, SuspensionState::Value(_) | SuspensionState::Panicked(_) | SuspensionState::Joined)
@@ -251,6 +252,11 @@ impl<T> Suspension<T> {
         joint
     }
 
+    /// Checks readiness.
+    pub fn is_ready(&self) -> bool {
+        self.0.is_ready()
+    }
+
     /// Suspends calling coroutine until [Resumption::resume].
     ///
     /// # Panics
@@ -291,9 +297,9 @@ impl<T> Resumption<T> {
     }
 
     /// Resumes suspending coroutine.
-    pub fn resume(self, value: T) {
+    pub fn resume(self, value: T) -> bool {
         let joint = unsafe { self.into_joint() };
-        joint.wake(value).ignore();
+        joint.wake(value).is_ok()
     }
 
     /// Sends and wakes peer if not waked.

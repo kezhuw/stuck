@@ -8,9 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 - Support crate name customization in #[stuck::main] and #[stuck::test]
+- Channel for commnication across coroutines in one task
+- Select for both serial and parallel channels.
 
 ### Changed
 - Refactor session/suspension implementations and semantics
+- Return waked for `SessionWaker.wake` and `Resumption.resume`
+
+### Fixed
+- Wake ealier due to partially elapsed tick
 
 ## [0.1.5] - 2022-04-09
 ### Added

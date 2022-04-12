@@ -8,7 +8,8 @@ use std::{ptr, thread};
 
 use ignore_result::Ignore;
 
-use crate::task::mpsc::{self, Sender};
+use crate::channel::parallel::{self, Sender};
+use crate::channel::prelude::*;
 use crate::task::{self, SchedFlow, Task};
 use crate::{net, time};
 
@@ -67,7 +68,7 @@ impl Builder {
         let parallelism = self
             .parallelism
             .unwrap_or_else(|| thread::available_parallelism().unwrap_or(NonZeroUsize::new(4).unwrap()).get());
-        let (time_sender, time_receiver) = mpsc::unbounded(512);
+        let (time_sender, time_receiver) = parallel::unbounded(512);
         let poller = net::Poller::new().unwrap();
         let scheduler = Scheduler::new(parallelism, time_sender.clone(), poller.registry());
         let stopper = poller.start().unwrap();
@@ -76,7 +77,7 @@ impl Builder {
             time::timer(timer, time_receiver);
         });
         let ticker = thread::spawn(move || {
-            time::tick(time_sender);
+            time::tickr(time_sender);
         });
         let scheduling_threads = Scheduler::start(&scheduler);
         Runtime {

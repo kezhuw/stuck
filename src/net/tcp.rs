@@ -9,13 +9,14 @@ use ignore_result::Ignore;
 use mio::net;
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
+use crate::channel::parallel;
+use crate::channel::prelude::*;
 use crate::runtime::Scheduler;
-use crate::task::mpsc;
 
 /// Listener for incoming TCP connections.
 pub struct TcpListener {
     listener: net::TcpListener,
-    readable: mpsc::Receiver<()>,
+    readable: parallel::Receiver<()>,
 }
 
 assert_impl_all!(TcpListener: Send, Sync);
@@ -66,8 +67,8 @@ impl TcpListener {
 /// A TCP stream between a local and a remote socket.
 pub struct TcpStream {
     stream: net::TcpStream,
-    readable: mpsc::Receiver<()>,
-    writable: mpsc::Receiver<()>,
+    readable: parallel::Receiver<()>,
+    writable: parallel::Receiver<()>,
 }
 
 assert_impl_all!(TcpStream: Send, Sync);
@@ -196,7 +197,7 @@ impl TcpStream {
         self.stream.shutdown(std::net::Shutdown::Write)
     }
 
-    fn read(stream: &mut net::TcpStream, readable: &mut mpsc::Receiver<()>, buf: &mut [u8]) -> io::Result<usize> {
+    fn read(stream: &mut net::TcpStream, readable: &mut parallel::Receiver<()>, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match stream.read(buf) {
                 Ok(n) => return Ok(n),
@@ -208,7 +209,7 @@ impl TcpStream {
         }
     }
 
-    fn write(stream: &mut net::TcpStream, writable: &mut mpsc::Receiver<()>, buf: &[u8]) -> io::Result<usize> {
+    fn write(stream: &mut net::TcpStream, writable: &mut parallel::Receiver<()>, buf: &[u8]) -> io::Result<usize> {
         loop {
             match stream.write(buf) {
                 Ok(n) => return Ok(n),
@@ -232,7 +233,7 @@ impl AsRawFd for TcpStream {
 /// The read half of this connection will be shutdown when this value is dropped.
 pub struct TcpReader {
     stream: Rc<net::TcpStream>,
-    readable: mpsc::Receiver<()>,
+    readable: parallel::Receiver<()>,
 }
 
 assert_not_impl_any!(TcpReader: Send, Sync);
@@ -255,7 +256,7 @@ impl io::Read for TcpReader {
 /// The write half of this connection will be shutdown when this value is dropped.
 pub struct TcpWriter {
     stream: Rc<net::TcpStream>,
-    writable: mpsc::Receiver<()>,
+    writable: parallel::Receiver<()>,
 }
 
 assert_not_impl_any!(TcpReader: Send, Sync);
