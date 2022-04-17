@@ -1,16 +1,35 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use proc_macro2::Span;
+use proc_macro2::{Ident, Span};
 use quote::quote;
 
 #[derive(Default)]
 struct Configuration {
+    package: Option<Ident>,
     parallelism: Option<usize>,
 }
 
 impl Configuration {
-    fn set_parallelism(&mut self, span: Span, lit: syn::Lit) -> Result<(), syn::Error> {
+    fn set_package(&mut self, lit: syn::Lit) -> Result<(), syn::Error> {
+        let span = lit.span();
+        if self.package.is_some() {
+            return Err(syn::Error::new(span, "package name already set"));
+        }
+        if let syn::Lit::Str(s) = lit {
+            if let Ok(path) = s.parse::<syn::Path>() {
+                if let Some(ident) = path.get_ident() {
+                    self.package = Some(ident.clone());
+                    return Ok(());
+                }
+            }
+            return Err(syn::Error::new(span, format!("invalid package name: {}", s.value())));
+        }
+        Err(syn::Error::new(span, "invalid package name"))
+    }
+
+    fn set_parallelism(&mut self, lit: syn::Lit) -> Result<(), syn::Error> {
+        let span = lit.span();
         if self.parallelism.is_some() {
             return Err(syn::Error::new(span, "parallelism already set"));
         }
@@ -36,7 +55,8 @@ fn parse_config(args: syn::AttributeArgs) -> Result<Configuration, syn::Error> {
                     .ok_or_else(|| syn::Error::new_spanned(&name_value, "invalid attribute name"))?
                     .to_string();
                 match name.as_str() {
-                    "parallelism" => config.set_parallelism(name_value.lit.span(), name_value.lit)?,
+                    "parallelism" => config.set_parallelism(name_value.lit)?,
+                    "package" => config.set_package(name_value.lit)?,
                     _ => return Err(syn::Error::new_spanned(&name_value, "unknown attribute name")),
                 }
             },
@@ -79,16 +99,17 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
         quote! {}
     };
 
+    let package_name = config.package.unwrap_or_else(|| Ident::new("stuck", Span::call_site()));
     let parallelism = config.parallelism.unwrap_or(0);
     let result = quote! {
         #header
+        #(#attrs)*
         #vis fn #name() #ret {
-            #(#attrs)*
             fn entry(#inputs) #ret {
                 #body
             }
 
-            let mut builder = stuck::runtime::Builder::default();
+            let mut builder = #package_name::runtime::Builder::default();
             if #parallelism != 0 {
                 builder.parallelism(#parallelism);
             }

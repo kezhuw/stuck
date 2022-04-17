@@ -596,13 +596,11 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use crate::runtime::Builder;
     use crate::{coroutine, task};
 
-    #[test]
+    #[crate::test(package = "crate", parallelism = 1)]
     fn yield_now() {
-        let runtime = Builder::default().parallelism(1).build();
-        let five = runtime.spawn(|| {
+        let five = task::spawn(|| {
             let shared_value = Arc::new(Mutex::new(0));
             let shared_task_value = shared_value.clone();
             let shared_coroutine_value = shared_value.clone();
