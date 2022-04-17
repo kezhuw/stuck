@@ -297,13 +297,11 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use crate::coroutine;
-    use crate::runtime::Runtime;
+    use crate::{coroutine, task};
 
-    #[test]
+    #[crate::test(package = "crate")]
     fn yield_now() {
-        let runtime = Runtime::new();
-        let five = runtime.spawn(|| {
+        let five = task::spawn(|| {
             let value = Rc::new(Cell::new(0));
             let shared_value = value.clone();
             coroutine::spawn(move || {
