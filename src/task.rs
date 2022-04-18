@@ -1,21 +1,21 @@
-use std::any::Any;
-use std::cell::{Cell, UnsafeCell};
-use std::collections::{HashMap, VecDeque};
-use std::marker::PhantomData;
+use std::cell::Cell;
+use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{mem, ptr};
 
-use ignore_result::Ignore;
-use static_assertions::{assert_impl_all, assert_not_impl_any};
+use hashbrown::HashMap;
+use static_assertions::assert_impl_all;
 
+pub use self::session::{session, Session, SessionWaker};
 use crate::coroutine::stack::StackSize;
 use crate::coroutine::{self, Coroutine};
-use crate::error::{JoinError, PanicError};
+use crate::error::JoinError;
 use crate::runtime::Scheduler;
 
 pub mod mpsc;
+mod session;
 
 static TID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -127,7 +127,7 @@ impl<T: Send + 'static> JoinHandle<T> {
 
 // Yielding point.
 pub(crate) trait Yielding {
-    fn interrupt(&self, reason: &'static str);
+    fn interrupt(&self, reason: &'static str) -> bool;
 }
 
 pub(crate) struct Task {
@@ -246,10 +246,10 @@ impl Task {
             yielding.interrupt(msg);
             self.running_coroutines.push_back(co);
         }
-        for (co, yielding) in self.blocking_coroutines.drain() {
-            yielding.interrupt(msg);
+        for (co, _) in self.blocking_coroutines.drain_filter(|_, yielding| yielding.interrupt(msg)) {
             self.running_coroutines.push_back(co);
         }
+        self.unblock(false);
     }
 
     pub fn abort(&mut self, msg: &'static str) {
@@ -257,6 +257,11 @@ impl Task {
         loop {
             self.interrupt(msg);
             if self.running_coroutines.is_empty() {
+                if !self.blocking_coroutines.is_empty() {
+                    // Someone else win session wakeup. Let's snooze.
+                    std::hint::spin_loop();
+                    continue;
+                }
                 break;
             }
             while let Some(co) = self.running_coroutines.pop_front() {
@@ -354,333 +359,6 @@ impl Task {
     }
 }
 
-enum SessionState<T: Send + 'static> {
-    Empty,
-    Value(T),
-    Panicked(PanicError),
-    TaskJoining { scheduler: ptr::NonNull<Scheduler>, task: Weak<Task>, coroutine: ptr::NonNull<Coroutine> },
-    ThreadJoining,
-    Joined,
-}
-
-struct SessionJoint<T: Send + 'static> {
-    // status: AtomicUsize,
-    // value: UnsafeCell<SessionValue<T>>,
-    state: Mutex<SessionState<T>>,
-
-    // - Use Option to avoid create os resource if not needed.
-    // - Use `UnsafeCell` to construct one if necessary.
-    // - Store it outside state so we can access it after unlocking.
-    condvar: UnsafeCell<Option<Condvar>>,
-
-    wakers: AtomicUsize,
-}
-
-// SAFETY: There are two immutable accessors.
-unsafe impl<T: Send> Sync for SessionJoint<T> {}
-
-// SAFETY: Normally, two immutable accessors are distributed to different tasks or threads.
-unsafe impl<T: Send> Send for SessionJoint<T> {}
-
-impl<T: Send + 'static> Yielding for SessionJoint<T> {
-    fn interrupt(&self, reason: &'static str) {
-        self.cancel(PanicError::Static(reason));
-    }
-}
-
-impl<T: Send + 'static> SessionJoint<T> {
-    fn new() -> Arc<Self> {
-        Arc::new(SessionJoint {
-            state: Mutex::new(SessionState::Empty),
-            condvar: UnsafeCell::new(None),
-            wakers: AtomicUsize::new(1),
-        })
-    }
-
-    fn condvar(&self) -> &Condvar {
-        unsafe { self.condvar.get().as_ref().unwrap().as_ref().unwrap() }
-    }
-
-    fn set_condvar(&self) -> &Condvar {
-        let condvar = unsafe { self.condvar.get().as_mut().unwrap() };
-        *condvar = Some(Condvar::new());
-        condvar.as_ref().unwrap()
-    }
-
-    #[cfg(test)]
-    fn is_ready(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        matches!(*state, SessionState::Value(_) | SessionState::Panicked(_) | SessionState::Joined)
-    }
-
-    fn wake(&self, value: T) -> Result<(), T> {
-        let mut state = self.state.lock().unwrap();
-        match &*state {
-            SessionState::TaskJoining { scheduler, task, coroutine } => {
-                let task = unsafe { ptr::read(task) };
-                let scheduler = *scheduler;
-                let coroutine = *coroutine;
-                unsafe { ptr::write(&mut *state, SessionState::Value(value)) };
-                drop(state);
-                Self::wake_task(scheduler, task, coroutine);
-                Ok(())
-            },
-            SessionState::ThreadJoining => {
-                unsafe { ptr::write(&mut *state, SessionState::Value(value)) };
-                drop(state);
-                let condvar = self.condvar();
-                condvar.notify_one();
-                Ok(())
-            },
-            SessionState::Empty => {
-                unsafe { ptr::write(&mut *state, SessionState::Value(value)) };
-                drop(state);
-                Ok(())
-            },
-            _ => Err(value),
-        }
-    }
-
-    fn cancel(&self, err: PanicError) -> Option<(ptr::NonNull<Scheduler>, Weak<Task>, ptr::NonNull<Coroutine>)> {
-        let mut state = self.state.lock().unwrap();
-        match &*state {
-            SessionState::TaskJoining { scheduler, task, coroutine } => {
-                let task = unsafe { ptr::read(task) };
-                let scheduler = *scheduler;
-                let coroutine = *coroutine;
-                unsafe { ptr::write(&mut *state, SessionState::Panicked(err)) };
-                drop(state);
-                Some((scheduler, task, coroutine))
-            },
-            SessionState::ThreadJoining => {
-                unsafe { ptr::write(&mut *state, SessionState::Panicked(err)) };
-                drop(state);
-                let condvar = self.condvar();
-                condvar.notify_one();
-                None
-            },
-            SessionState::Empty => {
-                unsafe { ptr::write(&mut *state, SessionState::Panicked(err)) };
-                drop(state);
-                None
-            },
-            _ => None,
-        }
-    }
-
-    fn fault(&self, err: PanicError) {
-        if let Some((scheduler, task, coroutine)) = self.cancel(err) {
-            Self::wake_task(scheduler, task, coroutine);
-        }
-    }
-
-    fn add_waker(&self) {
-        self.wakers.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn remove_waker(&self) {
-        if self.wakers.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.fault(PanicError::Static("session: no wakeup"));
-        }
-    }
-
-    fn wait_on_thread(&self, mut locked: MutexGuard<SessionState<T>>) -> Result<T, PanicError> {
-        *locked = SessionState::ThreadJoining;
-        let condvar = self.set_condvar();
-        // Loop to avoid spurious wakeup
-        loop {
-            locked = condvar.wait(locked).unwrap();
-            let state = mem::replace(&mut *locked, SessionState::ThreadJoining);
-            match state {
-                SessionState::Value(value) => return Ok(value),
-                SessionState::Panicked(err) => return Err(err),
-                SessionState::ThreadJoining => {},
-                SessionState::TaskJoining { .. } => {
-                    unreachable!("session: state transit from ThreadJoining to TaskJoining")
-                },
-                SessionState::Empty => unreachable!("session: state transit from ThreadJoining to Empty"),
-                SessionState::Joined => unreachable!("session: state transit from ThreadJoining to Joined"),
-            }
-        }
-    }
-
-    fn set_task_waiter(
-        &self,
-        task: ptr::NonNull<Task>,
-        mut locked: MutexGuard<SessionState<T>>,
-    ) -> ptr::NonNull<Coroutine> {
-        let strong = unsafe { Arc::from_raw(task.as_ptr()) };
-        let weak = Arc::downgrade(&strong);
-        mem::forget(strong);
-        let co = coroutine::current();
-        let scheduler = unsafe { ptr::NonNull::from(Scheduler::current()) };
-        *locked = SessionState::TaskJoining { scheduler, task: weak, coroutine: co };
-        co
-    }
-
-    fn wake_task(scheduler: ptr::NonNull<Scheduler>, task: Weak<Task>, coroutine: ptr::NonNull<Coroutine>) {
-        if let Some(task) = task.upgrade() {
-            if task.wake(coroutine) {
-                // SAFETY: scheduler lives longer than task
-                let scheduler = unsafe { scheduler.as_ref() };
-                scheduler.resume(&task);
-            }
-        }
-    }
-
-    fn wait_on_task(&self, mut task: ptr::NonNull<Task>, locked: MutexGuard<SessionState<T>>) -> Result<T, PanicError> {
-        let co = self.set_task_waiter(task, locked);
-        let task = unsafe { task.as_mut() };
-        task.block(co, self);
-        let mut locked = self.state.lock().unwrap();
-        let state = mem::replace(&mut *locked, SessionState::Empty);
-        match state {
-            SessionState::Value(value) => Ok(value),
-            SessionState::Panicked(err) => Err(err),
-            _ => unreachable!("not in joining"),
-        }
-    }
-
-    fn join(&self) -> Result<T, PanicError> {
-        let mut locked = self.state.lock().unwrap();
-        let state = mem::replace(&mut *locked, SessionState::Joined);
-        match state {
-            SessionState::Empty => match task() {
-                None => self.wait_on_thread(locked),
-                Some(task) => self.wait_on_task(task, locked),
-            },
-            SessionState::Value(value) => Ok(value),
-            SessionState::Panicked(err) => Err(err),
-            SessionState::TaskJoining { .. } | SessionState::ThreadJoining => unreachable!("already joining"),
-            SessionState::Joined => unreachable!("already joined"),
-        }
-    }
-}
-
-/// Session provides method to block current coroutine until waking by [SessionWaker].
-pub struct Session<T: Send + 'static> {
-    joint: Arc<SessionJoint<T>>,
-    marker: PhantomData<NotSendable>,
-}
-
-/// SessionWaker provides method to wake associated [Session].
-pub struct SessionWaker<T: Send + 'static> {
-    joint: Arc<SessionJoint<T>>,
-    marker: PhantomData<Sendable>,
-}
-
-struct NotSendable(std::rc::Rc<()>);
-assert_not_impl_any!(NotSendable: Send, Sync);
-
-struct Sendable(std::rc::Rc<()>);
-unsafe impl Send for Sendable {}
-assert_impl_all!(Sendable: Send);
-assert_not_impl_any!(Sendable: Sync);
-
-// SessionWaker should be able to send across tasks and threads.
-assert_impl_all!(SessionWaker<Sendable>: Send);
-
-// SessionWaker should owned by only one task or thread.
-assert_not_impl_any!(SessionWaker<Sendable>: Sync);
-
-// Session should be used only be producing task or thread.
-assert_not_impl_any!(Session<Sendable>: Send, Sync);
-
-impl<T: Send + 'static> Session<T> {
-    fn new(joint: Arc<SessionJoint<T>>) -> Session<T> {
-        Session { joint, marker: PhantomData }
-    }
-
-    unsafe fn into_joint(self) -> Arc<SessionJoint<T>> {
-        let joint = ptr::read(&self.joint);
-        mem::forget(self);
-        joint
-    }
-
-    /// Waits peer to wake it.
-    ///
-    /// # Panics
-    /// Panic if no wakeup from [SessionWaker].
-    ///
-    /// # Guarantee
-    /// Only two situations can happen:
-    /// * This method panics and no value sent
-    /// * This method returns and only one value sent
-    ///
-    /// This means that no value linger after panic.
-    pub fn wait(self) -> T {
-        let joint = unsafe { self.into_joint() };
-        match joint.join() {
-            Ok(value) => value,
-            Err(PanicError::Static(s)) => panic::panic_any(s),
-            Err(PanicError::Unwind(err)) => panic::resume_unwind(err),
-        }
-    }
-}
-
-impl<T: Send + 'static> Drop for Session<T> {
-    fn drop(&mut self) {
-        self.joint.cancel(PanicError::Static("session dropped"));
-    }
-}
-
-impl<T: Send> Clone for SessionWaker<T> {
-    fn clone(&self) -> Self {
-        self.joint.add_waker();
-        Self { joint: self.joint.clone(), marker: PhantomData }
-    }
-}
-
-impl<T: Send> Drop for SessionWaker<T> {
-    fn drop(&mut self) {
-        self.joint.remove_waker();
-    }
-}
-
-impl<T: Send> SessionWaker<T> {
-    fn new(joint: Arc<SessionJoint<T>>) -> SessionWaker<T> {
-        SessionWaker { joint, marker: PhantomData }
-    }
-
-    // SAFETY: Forget self and cancel drop to wake peer with no suspension interleave.
-    unsafe fn into_joint(self) -> Arc<SessionJoint<T>> {
-        let joint = ptr::read(&self.joint);
-        mem::forget(self);
-        joint
-    }
-
-    /// Wakes peer.
-    pub fn wake(self, value: T) {
-        let joint = unsafe { self.into_joint() };
-        joint.wake(value).ignore();
-    }
-
-    /// Sends and wakes peer if not waked.
-    pub fn send(self, value: T) -> Result<(), T> {
-        let joint = unsafe { self.into_joint() };
-        joint.wake(value)
-    }
-
-    fn set_result(self, result: Result<T, Box<dyn Any + Send + 'static>>) {
-        let joint = unsafe { self.into_joint() };
-        match result {
-            Ok(value) => joint.wake(value).ignore(),
-            Err(err) => joint.fault(PanicError::Unwind(err)),
-        };
-    }
-}
-
-/// Constructs cooperative facilities to wait and wake coroutine across task boundary.
-pub fn session<T>() -> (Session<T>, SessionWaker<T>)
-where
-    T: Send,
-{
-    let joint = SessionJoint::new();
-    let session = Session::new(joint.clone());
-    let session_waker = SessionWaker::new(joint);
-    (session, session_waker)
-}
-
 /// Yields task for next scheduling cycle.
 pub fn yield_now() {
     let t = unsafe { current().as_mut() };
@@ -731,33 +409,6 @@ mod tests {
             *value
         });
         assert_eq!(5, five.join().unwrap());
-    }
-
-    #[crate::test(crate = "crate")]
-    fn session_waker() {
-        let (session, waker) = task::session();
-        drop(waker.clone());
-        let task1 = task::spawn({
-            let waker = waker.clone();
-            move || waker.send(5)
-        });
-        let task2 = task::spawn(move || waker.send(6));
-        let value = session.wait();
-        let mut result1 = task1.join().unwrap();
-        let mut result2 = task2.join().unwrap();
-        if result1.is_err() {
-            std::mem::swap(&mut result1, &mut result2);
-        }
-        assert_eq!(result1, Ok(()));
-        assert_eq!(result2.is_err(), true);
-        assert_eq!(value, 11 - result2.unwrap_err());
-    }
-
-    #[crate::test(crate = "crate")]
-    fn session_dropped() {
-        let (session, waker) = task::session::<()>();
-        drop(session);
-        assert_eq!(waker.joint.is_ready(), true);
     }
 
     #[crate::test(crate = "crate")]

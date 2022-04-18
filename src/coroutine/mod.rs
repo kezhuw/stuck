@@ -133,8 +133,9 @@ struct SuspensionJoint<T: 'static> {
 }
 
 impl<T> Yielding for SuspensionJoint<T> {
-    fn interrupt(&self, reason: &'static str) {
+    fn interrupt(&self, reason: &'static str) -> bool {
         self.cancel(PanicError::Static(reason));
+        true
     }
 }
 
@@ -394,6 +395,7 @@ mod tests {
     fn resumption() {
         let (suspension, resumption) = coroutine::suspension();
         drop(resumption.clone());
+        assert_eq!(suspension.0.is_ready(), false);
         let co1 = coroutine::spawn({
             let resumption = resumption.clone();
             move || resumption.send(5)
