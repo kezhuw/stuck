@@ -6,26 +6,26 @@ use quote::quote;
 
 #[derive(Default)]
 struct Configuration {
-    package: Option<Ident>,
+    crate_name: Option<Ident>,
     parallelism: Option<usize>,
 }
 
 impl Configuration {
-    fn set_package(&mut self, lit: syn::Lit) -> Result<(), syn::Error> {
+    fn set_crate_name(&mut self, lit: syn::Lit) -> Result<(), syn::Error> {
         let span = lit.span();
-        if self.package.is_some() {
-            return Err(syn::Error::new(span, "package name already set"));
+        if self.crate_name.is_some() {
+            return Err(syn::Error::new(span, "crate name already set"));
         }
         if let syn::Lit::Str(s) = lit {
             if let Ok(path) = s.parse::<syn::Path>() {
                 if let Some(ident) = path.get_ident() {
-                    self.package = Some(ident.clone());
+                    self.crate_name = Some(ident.clone());
                     return Ok(());
                 }
             }
-            return Err(syn::Error::new(span, format!("invalid package name: {}", s.value())));
+            return Err(syn::Error::new(span, format!("invalid crate name: {}", s.value())));
         }
-        Err(syn::Error::new(span, "invalid package name"))
+        Err(syn::Error::new(span, "invalid crate name"))
     }
 
     fn set_parallelism(&mut self, lit: syn::Lit) -> Result<(), syn::Error> {
@@ -56,7 +56,7 @@ fn parse_config(args: syn::AttributeArgs) -> Result<Configuration, syn::Error> {
                     .to_string();
                 match name.as_str() {
                     "parallelism" => config.set_parallelism(name_value.lit)?,
-                    "package" => config.set_package(name_value.lit)?,
+                    "crate" => config.set_crate_name(name_value.lit)?,
                     _ => return Err(syn::Error::new_spanned(&name_value, "unknown attribute name")),
                 }
             },
@@ -99,7 +99,7 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
         quote! {}
     };
 
-    let package_name = config.package.unwrap_or_else(|| Ident::new("stuck", Span::call_site()));
+    let crate_name = config.crate_name.unwrap_or_else(|| Ident::new("stuck", Span::call_site()));
     let parallelism = config.parallelism.unwrap_or(0);
     let result = quote! {
         #header
@@ -109,7 +109,7 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
                 #body
             }
 
-            let mut builder = #package_name::runtime::Builder::default();
+            let mut builder = #crate_name::runtime::Builder::default();
             if #parallelism != 0 {
                 builder.parallelism(#parallelism);
             }

@@ -299,7 +299,7 @@ mod tests {
 
     use crate::{coroutine, task};
 
-    #[crate::test(package = "crate")]
+    #[crate::test(crate = "crate")]
     fn yield_now() {
         let five = task::spawn(|| {
             let value = Rc::new(Cell::new(0));

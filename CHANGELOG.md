@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
-- Support package name customization in #[stuck::main] and #[stuck::test]
+- Support crate name customization in #[stuck::main] and #[stuck::test]
 
 ## [0.1.5] - 2022-04-09
 ### Added
