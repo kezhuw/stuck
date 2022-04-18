@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Support crate name customization in #[stuck::main] and #[stuck::test]
 
+### Changed
+- Refactor session/suspension implementations and semantics
+
 ## [0.1.5] - 2022-04-09
 ### Added
 - `Sender::try_send` to send without blocking current execution.
