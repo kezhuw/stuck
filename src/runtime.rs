@@ -272,6 +272,7 @@ impl Scheduler {
         while state.stopped == self.parallelism as isize {
             state = self.run(state)
         }
+        // No timer and io poller now, this is the sole execution thread.
         while !state.registry.is_empty() {
             // SAFETY: Avoid compilation warning in read to `registry` and write to `runq`.
             let registry: &HashMap<u64, Arc<Task>> = unsafe { std::mem::transmute::<_, _>(&state.registry) };
