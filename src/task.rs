@@ -598,7 +598,7 @@ mod tests {
 
     use crate::{coroutine, task};
 
-    #[crate::test(package = "crate", parallelism = 1)]
+    #[crate::test(crate = "crate", parallelism = 1)]
     fn yield_now() {
         let five = task::spawn(|| {
             let shared_value = Arc::new(Mutex::new(0));
