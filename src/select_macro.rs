@@ -355,9 +355,9 @@ macro_rules! select {
         $cases:tt
         $default:tt
     ) => {{
-        use $crate::channel::select::Select;
+        use $crate::select::Select;
         const _LEN: usize = $crate::select!(@count $cases);
-        let mut _selector: [Option<&'_ dyn $crate::channel::select::Selectable>; _LEN] = [::std::option::Option::None; _LEN];
+        let mut _selector: [Option<&'_ dyn $crate::select::Selectable>; _LEN] = [::std::option::Option::None; _LEN];
         $crate::select!(
             @add
             _selector
@@ -466,7 +466,7 @@ macro_rules! select {
         $( _enabled = $pred; ) ?
         if _enabled {
             let ref _ref = $r;
-            let _ref = unsafe { ::std::mem::transmute::<&dyn $crate::channel::select::Selectable, &'_ dyn $crate::channel::select::Selectable>(_ref) };
+            let _ref = unsafe { ::std::mem::transmute::<&dyn $crate::select::Selectable, &'_ dyn $crate::select::Selectable>(_ref) };
             $selector[$index] = Some(_ref);
         }
         $crate::select!(
@@ -491,7 +491,7 @@ macro_rules! select {
         $( _enabled = $pred; ) ?
         if _enabled {
             let ref _ref = $s;
-            let _ref = unsafe { ::std::mem::transmute::<&dyn $crate::channel::select::Selectable, &'_ dyn $crate::channel::select::Selectable>(_ref) };
+            let _ref = unsafe { ::std::mem::transmute::<&dyn $crate::select::Selectable, &'_ dyn $crate::select::Selectable>(_ref) };
             $selector[$index] = Some(_ref);
         }
         $crate::select!(
@@ -521,7 +521,7 @@ macro_rules! select {
     ) => {{
         if $selection.0 == $index {
             { $selector };
-            use $crate::channel::select::PermitReceiver as _;
+            use $crate::select::PermitReader as _;
             let $bind = $r.consume_permit($selection.1);
             $body
         } else {
@@ -542,7 +542,7 @@ macro_rules! select {
     ) => {{
         if $selection.0 == $index {
             { $selector };
-            use $crate::channel::select::PermitSender as _;
+            use $crate::select::PermitWriter as _;
             let $bind = $s.consume_permit($selection.1, $v);
             $body
         } else {

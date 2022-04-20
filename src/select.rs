@@ -1,10 +1,9 @@
-//! Selectively send and receive values to/from multiple channels simultaneously.
+//! Selectively read and write values to/from multiple selectables simultaneously.
 
-use crate::channel::SendError;
 use crate::coroutine::{self, Resumption, Suspension};
 use crate::task::{self, Session, SessionWaker};
 
-/// Permit promises to [Select] that send or receive will not block current execution.
+/// Permit promises to [Select] that read or write will not block current execution.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Permit {
     primitive: usize,
@@ -195,7 +194,7 @@ impl<'a> Iterator for Enumerator<'a> {
     }
 }
 
-/// Select candidate to send or receive value in blocking or nonblocking.
+/// Select candidate to read and/or write value in blocking or nonblocking.
 pub trait Select<'a> {
     /// Returns all selectable candidates.
     fn selectables(&'a self) -> &[Option<&'a dyn Selectable>];
@@ -271,16 +270,21 @@ pub trait Selectable {
     fn unwatch_permit(&self, identifier: &Identifier);
 }
 
-/// Sender that send value with previously selected permit.
-pub trait PermitSender<T>: Selectable {
-    /// Consumes permit and sends given value. This operation must not block.
-    fn consume_permit(&mut self, permit: Permit, value: T) -> Result<(), SendError<T>>;
+/// Writer that writes value with previously selected permit.
+pub trait PermitWriter: Selectable {
+    type Item;
+    type Result;
+
+    /// Consumes permit and writes given value. This operation must not block.
+    fn consume_permit(&mut self, permit: Permit, value: Self::Item) -> Self::Result;
 }
 
-/// Receiver that receive value with previously selected permit.
-pub trait PermitReceiver<T>: Selectable {
-    /// Consumes permit and receives value. This operation must not block.
-    fn consume_permit(&mut self, permit: Permit) -> Option<T>;
+/// Reader that read value with previously selected permit.
+pub trait PermitReader: Selectable {
+    type Result;
+
+    /// Consumes permit and reads value. This operation must not block.
+    fn consume_permit(&mut self, permit: Permit) -> Self::Result;
 }
 
 impl<T> Selectable for &T
@@ -329,9 +333,8 @@ where
 mod tests {
     use ignore_result::Ignore;
 
-    use crate::channel::error::SendError;
     use crate::channel::prelude::*;
-    use crate::channel::{parallel, serial};
+    use crate::channel::{parallel, serial, SendError};
     use crate::{coroutine, select, task};
 
     #[test]

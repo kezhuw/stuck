@@ -9,9 +9,9 @@ use ignore_result::Ignore;
 use static_assertions::assert_not_impl_any;
 
 use crate::channel::prelude::*;
-use crate::channel::select::{Identifier, Permit, PermitReceiver, PermitSender, Selectable, Selector};
 use crate::channel::{self, SendError, TryRecvError, TrySendError};
 use crate::coroutine::{self, Resumption};
+use crate::select::{Identifier, Permit, PermitReader, PermitWriter, Selectable, Selector};
 use crate::time;
 
 enum Waker {
@@ -336,8 +336,11 @@ impl<T: 'static> Selectable for Sender<T> {
     }
 }
 
-impl<T: 'static> PermitSender<T> for Sender<T> {
-    fn consume_permit(&mut self, _permit: Permit, value: T) -> Result<(), SendError<T>> {
+impl<T: 'static> PermitWriter for Sender<T> {
+    type Item = T;
+    type Result = Result<(), SendError<T>>;
+
+    fn consume_permit(&mut self, _permit: Permit, value: Self::Item) -> Self::Result {
         match self.try_send(value) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => panic!("send not ready"),
@@ -446,8 +449,10 @@ impl<T: 'static> Selectable for Receiver<T> {
     }
 }
 
-impl<T: 'static> PermitReceiver<T> for Receiver<T> {
-    fn consume_permit(&mut self, _permit: Permit) -> Option<T> {
+impl<T: 'static> PermitReader for Receiver<T> {
+    type Result = Option<T>;
+
+    fn consume_permit(&mut self, _permit: Permit) -> Self::Result {
         match self.try_recv() {
             Ok(value) => Some(value),
             Err(TryRecvError::Empty) => panic!("recv not ready"),
@@ -544,7 +549,7 @@ pub fn unbounded<T: 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 mod tests {
     use std::time::Instant;
 
-    use more_asserts::assert_ge;
+    use more_asserts::{assert_ge, assert_le};
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -659,11 +664,11 @@ mod tests {
             sender.send(3).unwrap();
             sender.send(4).unwrap();
             sender.send(5).unwrap();
-            assert!(now.elapsed() <= Duration::from_secs(5));
+            assert_le!(now.elapsed(), Duration::from_secs(5));
             let now = Instant::now();
             ready_sender.send(()).unwrap();
             sender.send(6).unwrap();
-            assert!(now.elapsed() >= Duration::from_secs(5));
+            assert_ge!(now.elapsed(), Duration::from_secs(5));
         });
         ready_receiver.recv().unwrap();
         time::sleep(Duration::from_secs(5));
@@ -690,7 +695,7 @@ mod tests {
             sender.send(4).unwrap();
             sender.send(5).unwrap();
             sender.send(6).unwrap();
-            assert!(now.elapsed() <= Duration::from_secs(5));
+            assert_le!(now.elapsed(), Duration::from_secs(5));
         });
         ready_receiver.recv().unwrap();
         time::sleep(Duration::from_secs(6));
