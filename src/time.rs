@@ -258,6 +258,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use more_asserts::assert_ge;
     use test_case::test_case;
 
     use super::*;
@@ -321,7 +322,7 @@ mod tests {
         });
         thread::sleep(Duration::from_secs(5));
         timer.update(time + timeout + 1);
-        assert!(join_handle.join().unwrap() >= Duration::from_secs(5));
+        assert_ge!(join_handle.join().unwrap(), Duration::from_secs(5));
     }
 
     #[test]
@@ -332,7 +333,7 @@ mod tests {
             time::sleep(Duration::from_secs(6));
         });
         sleep.join().unwrap();
-        assert!(now.elapsed() >= Duration::from_secs(5));
+        assert_ge!(now.elapsed(), Duration::from_secs(5));
     }
 
     #[test]

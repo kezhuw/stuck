@@ -8,8 +8,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use num_enum::{IntoPrimitive, UnsafeFromPrimitive};
 
 use crate::channel::prelude::*;
-use crate::channel::select::{self, Identifier, PermitReceiver, PermitSender, Selectable, Selector};
 use crate::channel::{self, SendError, TryRecvError, TrySendError};
+use crate::select::{self, Identifier, PermitReader, PermitWriter, Selectable, Selector};
 use crate::task::{self, SessionWaker};
 
 #[repr(usize)]
@@ -520,8 +520,11 @@ impl<T: Send + 'static> Selectable for Sender<T> {
     }
 }
 
-impl<T: Send + 'static> PermitSender<T> for Sender<T> {
-    fn consume_permit(&mut self, permit: select::Permit, value: T) -> Result<(), SendError<T>> {
+impl<T: Send + 'static> PermitWriter for Sender<T> {
+    type Item = T;
+    type Result = Result<(), SendError<T>>;
+
+    fn consume_permit(&mut self, permit: select::Permit, value: Self::Item) -> Self::Result {
         let permit = Permit::from(permit);
         assert!(permit != Permit::Recv);
         if permit == Permit::Closed {
@@ -636,8 +639,10 @@ impl<T: Send + 'static> Selectable for Receiver<T> {
     }
 }
 
-impl<T: Send + 'static> PermitReceiver<T> for Receiver<T> {
-    fn consume_permit(&mut self, permit: select::Permit) -> Option<T> {
+impl<T: Send + 'static> PermitReader for Receiver<T> {
+    type Result = Option<T>;
+
+    fn consume_permit(&mut self, permit: select::Permit) -> Self::Result {
         let permit = Permit::from(permit);
         assert!(permit != Permit::Send);
         if permit == Permit::Closed {
@@ -718,6 +723,8 @@ impl<T: Send + 'static> std::iter::FusedIterator for IntoIter<T> {}
 mod tests {
     use std::time::{Duration, Instant};
 
+    use more_asserts::{assert_ge, assert_le};
+
     use super::*;
     use crate::runtime::Builder;
 
@@ -788,9 +795,9 @@ mod tests {
             sender.send(3).unwrap();
             sender.send(4).unwrap();
             sender.send(5).unwrap();
-            assert!(now.elapsed() <= Duration::from_secs(5));
+            assert_le!(now.elapsed(), Duration::from_secs(5));
             sender.send(6).unwrap();
-            assert!(now.elapsed() >= Duration::from_secs(5));
+            assert_ge!(now.elapsed(), Duration::from_secs(5));
         });
         ready_receiver.recv().unwrap();
         std::thread::sleep(Duration::from_secs(10));
@@ -818,7 +825,7 @@ mod tests {
             sender.send(4).unwrap();
             sender.send(5).unwrap();
             sender.send(6).unwrap();
-            assert!(now.elapsed() <= Duration::from_secs(5));
+            assert_le!(now.elapsed(), Duration::from_secs(5));
         });
         ready_receiver.recv().unwrap();
         std::thread::sleep(Duration::from_secs(10));

@@ -3,8 +3,6 @@
 mod error;
 pub mod parallel;
 pub mod prelude;
-pub mod select;
-mod select_macro;
 pub mod serial;
 
 pub use self::error::{SendError, TryRecvError, TrySendError};
