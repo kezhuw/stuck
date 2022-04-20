@@ -6,21 +6,21 @@ use stuck::{coroutine, task};
 
 #[test]
 fn test_runtime_spawn() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let five = runtime.spawn(|| 5);
     assert_eq!(5, five.join().unwrap());
 }
 
 #[test]
 fn test_task_spawn() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let five = runtime.spawn(|| task::spawn(|| 5).join().unwrap());
     assert_eq!(5, five.join().unwrap());
 }
 
 #[test]
 fn test_task_session() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let five = runtime.spawn(|| {
         let (session, waker) = task::session::<i32>();
         task::spawn(move || waker.wake(5));
@@ -32,7 +32,7 @@ fn test_task_session() {
 #[test]
 #[should_panic(expected = "session: no wakeup")]
 fn test_task_session_no_wakeup() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let five = runtime.spawn(|| {
         let (session, waker) = task::session::<i32>();
         task::spawn(move || drop(waker));
@@ -43,7 +43,7 @@ fn test_task_session_no_wakeup() {
 
 #[test]
 fn test_task_session_waked_by_thread() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let (sender, receiver) = mpsc::sync_channel::<task::SessionWaker<i32>>(1);
     let five = runtime.spawn(move || {
         let (session, waker) = task::session::<i32>();
@@ -57,14 +57,14 @@ fn test_task_session_waked_by_thread() {
 
 #[test]
 fn test_coroutine_spawn() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let five = runtime.spawn(|| coroutine::spawn(|| 5).join().unwrap());
     assert_eq!(5, five.join().unwrap());
 }
 
 #[test]
 fn test_coroutine_suspension() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let five = runtime.spawn(|| {
         let (suspension, resumption) = coroutine::suspension::<i32>();
         coroutine::spawn(move || resumption.resume(5));
@@ -76,7 +76,7 @@ fn test_coroutine_suspension() {
 #[test]
 #[should_panic(expected = "suspend: no resumption")]
 fn test_coroutine_suspension_no_wakeup() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let five = runtime.spawn(|| {
         let (suspension, resumption) = coroutine::suspension::<i32>();
         coroutine::spawn(move || drop(resumption));
@@ -87,7 +87,7 @@ fn test_coroutine_suspension_no_wakeup() {
 
 #[test]
 fn test_twenty() {
-    let runtime = Runtime::new();
+    let mut runtime = Runtime::new();
     let twenty = runtime.spawn(|| {
         let five_coroutine = coroutine::spawn(|| 5);
 
