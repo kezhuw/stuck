@@ -223,26 +223,31 @@ pub trait Select<'a> {
             return selection;
         }
         let selectables = self.selectables();
-        let disabled = selectables.iter().flatten().count() == 0;
-        if disabled {
-            panic!("all select cases disabled with no `default`");
-        }
         let parallel = selectables.iter().flatten().any(|s| s.parallel());
-        let identifier = Identifier::new(&disabled as *const bool as *const ());
+        let identifier = Identifier::new(&parallel as *const bool as *const ());
         let (waiter, waker) = Waker::new(parallel);
-        let mut count = 0;
-        let enumerator = Enumerator::new(self.selectables());
+        let mut checked = 0;
+        let mut disabled = 0;
+        let enumerator = Enumerator::new(selectables);
         for (index, selectable) in enumerator.clone() {
             if let Some(selectable) = selectable {
                 let selector = Selector::new(index, waker.clone(), identifier.copy());
-                if selectable.watch_permit(selector) && waiter.is_ready() {
-                    break;
+                match selectable.watch_permit(selector) {
+                    None => disabled += 1,
+                    Some(true) if waiter.is_ready() => break,
+                    _ => {},
                 }
-                count += 1;
+            } else {
+                disabled += 1;
             }
+            checked += 1;
+        }
+        // Check disabled before drop useless waker otherwise we will get different panic.
+        if disabled == selectables.len() {
+            panic!("all select cases disabled with no `default`");
         }
         drop(waker);
-        let waiter = WitnessWaiter::new(count, waiter, identifier, enumerator);
+        let waiter = WitnessWaiter::new(checked, waiter, identifier, enumerator);
         waiter.wait()
     }
 }
@@ -263,8 +268,12 @@ pub trait Selectable {
 
     /// Watches for available permit.
     ///
-    /// If permit is avaiable now, applies it and returns true.
-    fn watch_permit(&self, selector: Selector) -> bool;
+    /// # Returns
+    /// * `None` if all permits has been consumed and there is no meaningful closed value. The case
+    /// where this selectable is consulted will be treated as disabled.
+    /// * `Some(true)` if a permit is avaiable and applied.
+    /// * `Some(false)` no permit avaiable to consume.
+    fn watch_permit(&self, selector: Selector) -> Option<bool>;
 
     /// Unwatches possible applied selector.
     fn unwatch_permit(&self, identifier: &Identifier);
@@ -299,7 +308,7 @@ where
         (**self).select_permit()
     }
 
-    fn watch_permit(&self, selector: Selector) -> bool {
+    fn watch_permit(&self, selector: Selector) -> Option<bool> {
         (**self).watch_permit(selector)
     }
 
@@ -320,7 +329,7 @@ where
         (**self).select_permit()
     }
 
-    fn watch_permit(&self, selector: Selector) -> bool {
+    fn watch_permit(&self, selector: Selector) -> Option<bool> {
         (**self).watch_permit(selector)
     }
 
