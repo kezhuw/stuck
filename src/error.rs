@@ -51,6 +51,12 @@ impl JoinError {
     }
 }
 
+impl From<PanicError> for JoinError {
+    fn from(err: PanicError) -> Self {
+        JoinError { err }
+    }
+}
+
 impl fmt::Debug for JoinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.err.as_str() {

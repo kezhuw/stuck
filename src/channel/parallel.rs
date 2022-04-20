@@ -504,12 +504,12 @@ impl<T: Send + 'static> Selectable for Sender<T> {
         }
     }
 
-    fn watch_permit(&self, selector: Selector) -> bool {
+    fn watch_permit(&self, selector: Selector) -> Option<bool> {
         if let Some(channel) = &self.channel {
-            channel.watch_send_permit(selector)
+            Some(channel.watch_send_permit(selector))
         } else {
             selector.apply(Permit::Closed.into());
-            true
+            Some(true)
         }
     }
 
@@ -623,12 +623,12 @@ impl<T: Send + 'static> Selectable for Receiver<T> {
         }
     }
 
-    fn watch_permit(&self, selector: Selector) -> bool {
+    fn watch_permit(&self, selector: Selector) -> Option<bool> {
         if let Some(channel) = &self.channel {
-            channel.watch_recv_permit(selector)
+            Some(channel.watch_recv_permit(selector))
         } else {
             selector.apply(Permit::Closed.into());
-            true
+            Some(true)
         }
     }
 
