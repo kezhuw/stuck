@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn bounded_blocking() {
-        let runtime = Builder::default().parallelism(1).build();
+        let mut runtime = Builder::default().parallelism(1).build();
         let (mut ready_sender, mut ready_receiver) = bounded::<()>(1);
         let (mut sender, mut receiver) = bounded::<i32>(5);
         let sending = runtime.spawn(move || {
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn unbounded_nonblocking() {
-        let runtime = Builder::default().parallelism(1).build();
+        let mut runtime = Builder::default().parallelism(1).build();
         let (mut ready_sender, mut ready_receiver) = bounded::<()>(1);
         let (mut sender, mut receiver) = unbounded::<i32>(0);
         let sending = runtime.spawn(move || {

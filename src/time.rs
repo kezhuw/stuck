@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn runtime_sleep() {
-        let runtime = Runtime::new();
+        let mut runtime = Runtime::new();
         let now = Instant::now();
         let sleep = runtime.spawn(|| {
             time::sleep(Duration::from_secs(6));
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn runtime_sleep_zero() {
-        let runtime = Runtime::new();
+        let mut runtime = Runtime::new();
         let sleep = runtime.spawn(|| {
             time::sleep(Duration::ZERO);
         });

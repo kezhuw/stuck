@@ -113,7 +113,7 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
             if #parallelism != 0 {
                 builder.parallelism(#parallelism);
             }
-            let runtime = builder.build();
+            let mut runtime = builder.build();
             let task = runtime.spawn(entry);
             task.join().unwrap()
         }

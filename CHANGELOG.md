@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Refactor session/suspension implementations and semantics
 - Return waked for `SessionWaker.wake` and `Resumption.resume`
+- Enforce mutable `Runtime` to spawn task to avoid future breaking change
 
 ### Fixed
 - Wake ealier due to partially elapsed tick

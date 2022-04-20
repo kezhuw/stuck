@@ -115,7 +115,7 @@ impl Runtime {
     /// Spawns a concurrent task and returns a [task::JoinHandle] for it.
     ///
     /// See [task::spawn] for more details
-    pub fn spawn<F, T>(&self, f: F) -> task::JoinHandle<T>
+    pub fn spawn<F, T>(&mut self, f: F) -> task::JoinHandle<T>
     where
         F: FnOnce() -> T,
         F: Send + 'static,
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn runtime_builder_parallelism_one() {
-        let runtime = Builder::default().parallelism(1).build();
+        let mut runtime = Builder::default().parallelism(1).build();
         let secret = 333;
         let set_secret = runtime.spawn(move || {
             thread::sleep(Duration::from_secs(10));
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn runtime_builder_parallelism_multiple() {
-        let runtime = Builder::default().parallelism(2).build();
+        let mut runtime = Builder::default().parallelism(2).build();
         let secret = 111;
         let set_secret = runtime.spawn(move || {
             thread::sleep(Duration::from_secs(10));
