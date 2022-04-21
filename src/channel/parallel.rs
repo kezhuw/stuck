@@ -9,7 +9,7 @@ use num_enum::{IntoPrimitive, UnsafeFromPrimitive};
 
 use crate::channel::prelude::*;
 use crate::channel::{self, SendError, TryRecvError, TrySendError};
-use crate::select::{self, Identifier, PermitReader, PermitWriter, Selectable, Selector};
+use crate::select::{self, Identifier, PermitReader, PermitWriter, Selectable, Selector, TrySelectError};
 use crate::task::{self, SessionWaker};
 
 #[repr(usize)]
@@ -496,20 +496,20 @@ impl<T: Send + 'static> Selectable for Sender<T> {
         self.channel.is_some()
     }
 
-    fn select_permit(&self) -> Option<select::Permit> {
+    fn select_permit(&self) -> Result<select::Permit, TrySelectError> {
         if let Some(channel) = &self.channel {
-            channel.reserve_send_permit().map(From::from)
+            channel.reserve_send_permit().map(From::from).map(Result::Ok).unwrap_or(Err(TrySelectError::WouldBlock))
         } else {
-            Some(Permit::Closed.into())
+            Ok(Permit::Closed.into())
         }
     }
 
-    fn watch_permit(&self, selector: Selector) -> Option<bool> {
+    fn watch_permit(&self, selector: Selector) -> bool {
         if let Some(channel) = &self.channel {
-            Some(channel.watch_send_permit(selector))
+            channel.watch_send_permit(selector)
         } else {
             selector.apply(Permit::Closed.into());
-            Some(true)
+            true
         }
     }
 
@@ -615,20 +615,20 @@ impl<T: Send + 'static> Selectable for Receiver<T> {
         self.channel.is_some()
     }
 
-    fn select_permit(&self) -> Option<select::Permit> {
+    fn select_permit(&self) -> Result<select::Permit, TrySelectError> {
         if let Some(channel) = &self.channel {
-            channel.reserve_recv_permit().map(From::from)
+            channel.reserve_recv_permit().map(From::from).map(Result::Ok).unwrap_or(Err(TrySelectError::WouldBlock))
         } else {
-            Some(Permit::Closed.into())
+            Ok(Permit::Closed.into())
         }
     }
 
-    fn watch_permit(&self, selector: Selector) -> Option<bool> {
+    fn watch_permit(&self, selector: Selector) -> bool {
         if let Some(channel) = &self.channel {
-            Some(channel.watch_recv_permit(selector))
+            channel.watch_recv_permit(selector)
         } else {
             selector.apply(Permit::Closed.into());
-            Some(true)
+            true
         }
     }
 
