@@ -500,7 +500,7 @@ impl<T: Send + 'static> Selectable for Sender<T> {
         if let Some(channel) = &self.channel {
             channel.reserve_send_permit().map(From::from).map(Result::Ok).unwrap_or(Err(TrySelectError::WouldBlock))
         } else {
-            Ok(Permit::Closed.into())
+            Err(TrySelectError::Completed)
         }
     }
 
@@ -508,8 +508,7 @@ impl<T: Send + 'static> Selectable for Sender<T> {
         if let Some(channel) = &self.channel {
             channel.watch_send_permit(selector)
         } else {
-            selector.apply(Permit::Closed.into());
-            true
+            false
         }
     }
 
@@ -546,6 +545,15 @@ impl<T: Send + 'static> PermitWriter for Sender<T> {
 /// Receiving peer of [Sender].
 pub struct Receiver<T: Send + 'static> {
     channel: Option<Arc<Channel<T>>>,
+}
+
+impl<T: Send + 'static> Receiver<T> {
+    /// Terminate this receiver for receiving values.
+    pub fn terminate(&mut self) {
+        if let Some(channel) = self.channel.take() {
+            channel.remove_receiver();
+        }
+    }
 }
 
 impl<T: Send + 'static> channel::Receiver<T> for Receiver<T> {
@@ -619,7 +627,7 @@ impl<T: Send + 'static> Selectable for Receiver<T> {
         if let Some(channel) = &self.channel {
             channel.reserve_recv_permit().map(From::from).map(Result::Ok).unwrap_or(Err(TrySelectError::WouldBlock))
         } else {
-            Ok(Permit::Closed.into())
+            Err(TrySelectError::Completed)
         }
     }
 
@@ -627,8 +635,7 @@ impl<T: Send + 'static> Selectable for Receiver<T> {
         if let Some(channel) = &self.channel {
             channel.watch_recv_permit(selector)
         } else {
-            selector.apply(Permit::Closed.into());
-            true
+            false
         }
     }
 
@@ -727,6 +734,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::Builder;
+    use crate::select;
 
     #[test]
     #[should_panic]
@@ -853,5 +861,59 @@ mod tests {
         assert_eq!(iter.next(), Some(3));
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next(), None);
+    }
+
+    #[crate::test(crate = "crate")]
+    fn send_close() {
+        let (mut sender, _receiver) = bounded(3);
+        sender.send(1).unwrap();
+
+        sender.close();
+
+        select! {
+            _ = sender<-2 => panic!("completed"),
+            complete => {},
+        }
+
+        assert_eq!(sender.send(3), Err(SendError::Closed(3)));
+    }
+
+    #[crate::test(crate = "crate")]
+    fn receiver_close() {
+        let (mut sender, mut receiver) = bounded(3);
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+        sender.send(3).unwrap();
+
+        receiver.close();
+        assert_eq!(receiver.recv(), Some(1));
+        select! {
+            r = <-receiver => assert_eq!(r, Some(2)),
+            complete => panic!("not completed"),
+        }
+        assert_eq!(receiver.recv(), Some(3));
+        select! {
+            r = <-receiver => assert_eq!(r, None),
+            complete => panic!("not completed"),
+        }
+        select! {
+            _ = <-receiver => panic!("completed"),
+            complete => {},
+        }
+        assert_eq!(receiver.recv(), None);
+    }
+
+    #[crate::test(crate = "crate")]
+    fn receiver_terminate() {
+        let (mut sender, mut receiver) = bounded(3);
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+
+        receiver.terminate();
+        select! {
+            _ = <-receiver => panic!("terminated"),
+            complete => {},
+        }
+        assert_eq!(receiver.recv(), None);
     }
 }

@@ -3,16 +3,13 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::time::Duration;
 
-use ignore_result::Ignore;
 use static_assertions::assert_not_impl_any;
 
 use crate::channel::prelude::*;
 use crate::channel::{self, SendError, TryRecvError, TrySendError};
 use crate::coroutine::{self, Resumption};
 use crate::select::{Identifier, Permit, PermitReader, PermitWriter, Selectable, Selector, TrySelectError};
-use crate::time;
 
 enum Waker {
     Selector(Selector),
@@ -316,17 +313,12 @@ impl<T: 'static> Selectable for Sender<T> {
                 Err(TrySelectError::WouldBlock)
             }
         } else {
-            Ok(Permit::default())
+            Err(TrySelectError::Completed)
         }
     }
 
     fn watch_permit(&self, selector: Selector) -> bool {
-        if let Some(channel) = &self.channel {
-            channel.watch_sendable(selector)
-        } else {
-            selector.apply(Permit::default());
-            true
-        }
+        self.channel.as_ref().map(|channel| channel.watch_sendable(selector)).unwrap_or(false)
     }
 
     fn unwatch_permit(&self, identifier: &Identifier) {
@@ -352,6 +344,15 @@ impl<T: 'static> PermitWriter for Sender<T> {
 /// Receiving peer of [Sender].
 pub struct Receiver<T: 'static> {
     channel: Option<Rc<Channel<T>>>,
+}
+
+impl<T: 'static> Receiver<T> {
+    /// Terminate this receiver for receiving values.
+    pub fn terminate(&mut self) {
+        if let Some(channel) = self.channel.take() {
+            channel.remove_receiver();
+        }
+    }
 }
 
 impl<T: 'static> channel::Receiver<T> for Receiver<T> {
@@ -429,17 +430,12 @@ impl<T: 'static> Selectable for Receiver<T> {
                 Err(TrySelectError::WouldBlock)
             }
         } else {
-            Ok(Permit::default())
+            Err(TrySelectError::Completed)
         }
     }
 
     fn watch_permit(&self, selector: Selector) -> bool {
-        if let Some(channel) = &self.channel {
-            channel.watch_recvable(selector)
-        } else {
-            selector.apply(Permit::default());
-            true
-        }
+        self.channel.as_ref().map(|channel| channel.watch_recvable(selector)).unwrap_or(false)
     }
 
     fn unwatch_permit(&self, identifier: &Identifier) {
@@ -495,43 +491,11 @@ fn channel<T: 'static>(capacity: usize, bound: usize) -> (Sender<T>, Receiver<T>
     (sender, receiver)
 }
 
-/// Constructs a receiver that is immediately ready with given value.
-pub fn ready<T: 'static>(value: T) -> Receiver<T> {
-    let (mut sender, receiver) = bounded(1);
-    sender.send(value).ignore();
-    receiver
-}
-
-/// Constructs a receiver that is ready with given value after specified duration.
-pub fn after<T>(timeout: Duration, value: T) -> Receiver<T> {
-    let (mut sender, receiver) = bounded(1);
-    coroutine::spawn(move || {
-        time::sleep(timeout);
-        sender.send(value).ignore();
-    });
-    receiver
-}
-
-/// Constructs a pair of closed sender and receiver.
-pub fn closed<T: 'static>() -> (Sender<T>, Receiver<T>) {
+/// Constructs a pair of completed sender and receiver.
+pub fn completed<T: 'static>() -> (Sender<T>, Receiver<T>) {
     let sender = Sender { channel: None };
     let receiver = Receiver { channel: None };
     (sender, receiver)
-}
-
-/// Ticks every `period` with possible `delay` before first tick.
-pub fn tick(period: Duration, delay: Option<Duration>) -> Receiver<()> {
-    assert!(period.as_millis() > 0, "period must be greater than or equal to 1ms");
-    let (mut sender, receiver) = bounded(512);
-    coroutine::spawn(move || {
-        if let Some(delay) = delay {
-            time::sleep(delay);
-        }
-        while sender.send(()).is_ok() {
-            time::sleep(period);
-        }
-    });
-    receiver
 }
 
 /// Constructs a bounded channel.
@@ -547,40 +511,34 @@ pub fn unbounded<T: 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use more_asserts::{assert_ge, assert_le};
     use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::channel::serial;
+    use crate::{select, time};
 
     #[crate::test(crate = "crate")]
-    fn ready() {
-        let mut receiver = serial::ready(());
-        assert_eq!(receiver.try_recv(), Ok(()));
-        assert_eq!(receiver.try_recv(), Err(TryRecvError::Closed));
-    }
-
-    #[crate::test(crate = "crate")]
-    fn after() {
-        use std::time::Instant;
-
-        let now = Instant::now();
-        let mut receiver = serial::after(Duration::from_secs(2), 5);
-        assert_eq!(receiver.recv(), Some(5));
-        assert_ge!(now.elapsed(), Duration::from_secs(2));
-        assert_eq!(receiver.recv(), None);
-    }
-
-    #[crate::test(crate = "crate")]
-    fn closed() {
-        let (mut sender, mut receiver) = serial::closed();
+    fn completed() {
+        let (mut sender, mut receiver) = serial::completed();
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Closed));
         assert_eq!(receiver.recv(), None);
 
         assert_eq!(sender.send(()), Err(SendError::Closed(())));
         assert_eq!(sender.try_send(()), Err(TrySendError::Closed(())));
+
+        assert!(sender.is_closed());
+        assert!(receiver.is_drained());
+        select! {
+            _ = <-receiver => unreachable!("completed"),
+            complete => {},
+        }
+        select! {
+            _ = sender<-() => unreachable!("completed"),
+            complete => {},
+        }
     }
 
     #[crate::test(crate = "crate")]
@@ -671,7 +629,7 @@ mod tests {
             assert_ge!(now.elapsed(), Duration::from_secs(5));
         });
         ready_receiver.recv().unwrap();
-        time::sleep(Duration::from_secs(5));
+        time::sleep(Duration::from_secs(6));
         assert_eq!(1, receiver.recv().unwrap());
         assert_eq!(2, receiver.recv().unwrap());
         assert_eq!(3, receiver.recv().unwrap());
@@ -707,5 +665,59 @@ mod tests {
         assert_eq!(6, receiver.recv().unwrap());
         assert_eq!(None, receiver.recv());
         sending.join().unwrap();
+    }
+
+    #[crate::test(crate = "crate")]
+    fn send_close() {
+        let (mut sender, _receiver) = bounded(3);
+        sender.send(1).unwrap();
+
+        sender.close();
+
+        select! {
+            _ = sender<-2 => panic!("completed"),
+            complete => {},
+        }
+
+        assert_eq!(sender.send(3), Err(SendError::Closed(3)));
+    }
+
+    #[crate::test(crate = "crate")]
+    fn receiver_close() {
+        let (mut sender, mut receiver) = bounded(3);
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+        sender.send(3).unwrap();
+
+        receiver.close();
+        assert_eq!(receiver.recv(), Some(1));
+        select! {
+            r = <-receiver => assert_eq!(r, Some(2)),
+            complete => panic!("not completed"),
+        }
+        assert_eq!(receiver.recv(), Some(3));
+        select! {
+            r = <-receiver => assert_eq!(r, None),
+            complete => panic!("not completed"),
+        }
+        select! {
+            _ = <-receiver => panic!("completed"),
+            complete => {},
+        }
+        assert_eq!(receiver.recv(), None);
+    }
+
+    #[crate::test(crate = "crate")]
+    fn receiver_terminate() {
+        let (mut sender, mut receiver) = bounded(3);
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+
+        receiver.terminate();
+        select! {
+            _ = <-receiver => panic!("terminated"),
+            complete => {},
+        }
+        assert_eq!(receiver.recv(), None);
     }
 }

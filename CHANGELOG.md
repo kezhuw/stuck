@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Generalize `select!` to read/write item and get result
+- Terminate channel after closed detected
+- Separate ready/after/interval from channel receiver.
 
 ## [0.2.0] - 2022-04-20
 ### Added
