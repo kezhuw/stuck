@@ -339,37 +339,201 @@ where
     }
 }
 
+/// [Selectable] for [never()].
+#[non_exhaustive]
+pub struct Never;
+
+/// Constructs a selectable that is never ready to consume.
+pub fn never() -> Never {
+    Never
+}
+
+impl PermitReader for Never {
+    type Result = std::convert::Infallible;
+
+    fn consume_permit(&mut self, _permit: Permit) -> Self::Result {
+        unreachable!("should never be consumed")
+    }
+}
+
+impl Selectable for Never {
+    fn parallel(&self) -> bool {
+        false
+    }
+
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
+        Err(TrySelectError::Completed)
+    }
+
+    fn watch_permit(&self, _selector: Selector) -> bool {
+        false
+    }
+
+    fn unwatch_permit(&self, _identifier: &Identifier) {}
+}
+
+/// [Selectable] for [ready].
+pub struct Ready<T> {
+    value: Option<T>,
+}
+
+/// Constructs a selectable that is immediately ready with given value.
+pub fn ready<T>(value: T) -> Ready<T> {
+    Ready { value: Some(value) }
+}
+
+impl<T> PermitReader for Ready<T> {
+    type Result = T;
+
+    fn consume_permit(&mut self, _permit: Permit) -> Self::Result {
+        self.value.take().expect("value already consumed")
+    }
+}
+
+impl<T> Selectable for Ready<T> {
+    fn parallel(&self) -> bool {
+        false
+    }
+
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
+        match self.value.as_ref() {
+            None => Err(TrySelectError::Completed),
+            Some(_) => Ok(Permit::default()),
+        }
+    }
+
+    fn watch_permit(&self, selector: Selector) -> bool {
+        if self.value.is_some() {
+            selector.apply(Permit::default());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unwatch_permit(&self, _identifier: &Identifier) {}
+}
+
+impl<T> Selectable for std::collections::VecDeque<T> {
+    fn parallel(&self) -> bool {
+        false
+    }
+
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
+        if self.is_empty() {
+            Err(TrySelectError::Completed)
+        } else {
+            Ok(Permit::default())
+        }
+    }
+
+    fn watch_permit(&self, selector: Selector) -> bool {
+        if self.is_empty() {
+            false
+        } else {
+            selector.apply(Permit::default());
+            true
+        }
+    }
+
+    fn unwatch_permit(&self, _identifier: &Identifier) {}
+}
+
+impl<T> PermitReader for std::collections::VecDeque<T> {
+    type Result = T;
+
+    fn consume_permit(&mut self, _permit: Permit) -> Self::Result {
+        self.pop_front().expect("all values consumed")
+    }
+}
+
+impl<T> Selectable for Option<T> {
+    fn parallel(&self) -> bool {
+        false
+    }
+
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
+        if self.is_none() {
+            Err(TrySelectError::Completed)
+        } else {
+            Ok(Permit::default())
+        }
+    }
+
+    fn watch_permit(&self, selector: Selector) -> bool {
+        if self.is_none() {
+            false
+        } else {
+            selector.apply(Permit::default());
+            true
+        }
+    }
+
+    fn unwatch_permit(&self, _identifier: &Identifier) {}
+}
+
+impl<T> PermitReader for Option<T> {
+    type Result = T;
+
+    fn consume_permit(&mut self, _permit: Permit) -> Self::Result {
+        self.take().expect("all values consumed")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ignore_result::Ignore;
 
     use crate::channel::prelude::*;
-    use crate::channel::{parallel, serial, SendError};
+    use crate::channel::{parallel, serial};
     use crate::{coroutine, select, task};
 
-    #[test]
-    fn select_closed() {
-        let (mut sender, mut receiver) = serial::closed();
-        assert!(sender.is_closed());
-        assert!(receiver.is_drained());
+    #[crate::test(crate = "crate")]
+    fn never() {
+        let mut never = select::never();
         select! {
-            r = <-receiver => assert_eq!(r, None),
-        }
-        select! {
-            r = sender<-() => assert_eq!(r, Err(SendError::Closed(()))),
+            _ = <-never => unreachable!("never"),
+            complete => {},
         }
     }
 
     #[test]
     fn select_ready() {
-        let mut receiver = serial::ready(());
+        let mut ready = select::ready(());
         select! {
-            r = <-receiver => assert_eq!(r, Some(())),
+            v = <-ready => assert_eq!(v, ()),
+            complete => unreachable!("not completed"),
         }
         select! {
-            r = <-receiver => assert_eq!(r, None),
+            _ = <-ready => unreachable!("ready consumed"),
+            complete => {},
         }
-        assert!(receiver.is_drained());
+    }
+
+    #[crate::test(crate = "crate")]
+    fn deque() {
+        let mut values = vec![1, 2, 3];
+        let mut deque: std::collections::VecDeque<_> = values.drain(..).collect();
+        assert_eq!(values, vec![]);
+        loop {
+            select! {
+                v = <-deque => values.push(v),
+                complete => break,
+            }
+        }
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[crate::test(crate = "crate")]
+    fn option() {
+        let mut option = Some(5);
+        loop {
+            select! {
+                v = <-option => assert_eq!(v, 5),
+                complete => break,
+            }
+        }
+        assert_eq!(option, None);
     }
 
     #[test]
@@ -424,7 +588,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "all selectables are disabled or completed")]
     fn select_disabled() {
-        let mut ready = serial::ready(());
+        let mut ready = select::ready(());
         select! {
             _ = <-ready, if false => unreachable!("not enabled"),
         }
@@ -432,7 +596,7 @@ mod tests {
 
     #[test]
     fn select_disabled_default() {
-        let mut ready = serial::ready(());
+        let mut ready = select::ready(());
         select! {
             _ = <-ready, if false => unreachable!("not enabled"),
             default => {},

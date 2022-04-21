@@ -2,10 +2,14 @@ use std::mem::{forget, replace, MaybeUninit};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+use ignore_result::Ignore;
+
 use crate::channel::parallel::{Receiver, Sender};
 use crate::channel::prelude::*;
+use crate::channel::serial;
 use crate::coroutine;
 use crate::runtime::Scheduler;
+use crate::select::{Identifier, Permit, PermitReader, Selectable, Selector, TrySelectError};
 use crate::task::{self, SessionWaker};
 
 const TIME_LEAST_SHIFT: usize = 14;
@@ -253,6 +257,96 @@ pub fn sleep(timeout: Duration) {
     session.wait();
 }
 
+/// [Selectable] for [interval];
+pub struct Interval {
+    receiver: serial::Receiver<()>,
+}
+
+impl Selectable for Interval {
+    fn parallel(&self) -> bool {
+        false
+    }
+
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
+        self.receiver.select_permit()
+    }
+
+    fn watch_permit(&self, selector: Selector) -> bool {
+        self.receiver.watch_permit(selector)
+    }
+
+    fn unwatch_permit(&self, identifier: &Identifier) {
+        self.receiver.unwatch_permit(identifier)
+    }
+}
+
+impl PermitReader for Interval {
+    type Result = ();
+
+    fn consume_permit(&mut self, permit: Permit) -> Self::Result {
+        self.receiver.consume_permit(permit).expect("runtime stopping");
+    }
+}
+
+/// Constructs a selectable that is ready to consume every `period` after optional `delay` before
+/// first emit.
+pub fn interval(period: Duration, delay: Option<Duration>) -> Interval {
+    assert!(period.as_millis() > 0, "period must be greater than or equal to 1ms");
+    let (mut sender, receiver) = serial::bounded(512);
+    coroutine::spawn(move || {
+        if let Some(delay) = delay {
+            sleep(delay);
+        }
+        while sender.send(()).is_ok() {
+            sleep(period);
+        }
+    });
+    Interval { receiver }
+}
+
+/// [Selectable] for [after].
+pub struct After {
+    receiver: serial::Receiver<()>,
+}
+
+/// Constructs a selectable that is ready to consume after specified duration.
+pub fn after(timeout: Duration) -> After {
+    let (mut sender, receiver) = serial::bounded(1);
+    coroutine::spawn(move || {
+        sleep(timeout);
+        sender.send(()).ignore();
+    });
+    After { receiver }
+}
+
+impl Selectable for After {
+    fn parallel(&self) -> bool {
+        false
+    }
+
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
+        self.receiver.select_permit()
+    }
+
+    fn watch_permit(&self, selector: Selector) -> bool {
+        self.receiver.watch_permit(selector)
+    }
+
+    fn unwatch_permit(&self, identifier: &Identifier) {
+        self.receiver.unwatch_permit(identifier)
+    }
+}
+
+impl PermitReader for After {
+    type Result = ();
+
+    fn consume_permit(&mut self, permit: Permit) -> Self::Result {
+        let value = self.receiver.consume_permit(permit).expect("runtime stopping");
+        self.receiver.terminate();
+        value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -263,7 +357,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::Runtime;
-    use crate::{task, time};
+    use crate::{select, task, time};
 
     #[test_case(0, 1)]
     #[test_case(0, 2)]
@@ -343,5 +437,32 @@ mod tests {
             time::sleep(Duration::ZERO);
         });
         sleep.join().unwrap();
+    }
+
+    #[crate::test(crate = "crate")]
+    fn after() {
+        let now = Instant::now();
+        let mut after = time::after(Duration::from_secs(2));
+        select! {
+            _ = <-after => assert_ge!(now.elapsed(), Duration::from_secs(1)),
+            complete => unreachable!("not completed"),
+        }
+        select! {
+            _ = <-after => unreachable!("completed"),
+            complete => {},
+        }
+    }
+
+    #[crate::test(crate = "crate")]
+    fn interval() {
+        let timeout = Duration::from_secs(2);
+        let mut now = Instant::now();
+        let mut interval = time::interval(timeout, Some(timeout));
+        for _ in 0..5 {
+            select! {
+                _ = <-interval => assert_ge!(now.elapsed(), Duration::from_secs(1)),
+            }
+            now = Instant::now();
+        }
     }
 }

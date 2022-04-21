@@ -17,11 +17,11 @@ use stuck::{select, task, time};
 
 #[stuck::main]
 fn main() {
-    let (mut task_sender, task_receiver) = parallel::bounded(1);
+    let (mut request_sender, request_receiver) = parallel::bounded(1);
     let (mut response_sender, mut response_receiver) = parallel::bounded(1);
 
     task::spawn(move || {
-        for value in task_receiver.into_iter() {
+        for value in request_receiver.into_iter() {
             time::sleep(Duration::from_secs(1));
             response_sender.send(value - 1).unwrap();
         }
@@ -30,18 +30,15 @@ fn main() {
     let mut tasks = vec![6, 6, 6, 6];
 
     let mut sum = 0;
-    while !response_receiver.is_drained() {
+    loop {
         select! {
-            r = <-response_receiver => {
-                if let Some(n) = r {
-                    sum += n;
-                }
+            r = <-response_receiver => if let Some(n) = r {
+                sum += n;
             },
-            _ = task_sender<-tasks.pop().unwrap(), if !tasks.is_empty() => {
-                if tasks.is_empty() {
-                    task_sender.close();
-                }
+            _ = request_sender<-tasks.pop().unwrap(), if !tasks.is_empty()  => if tasks.is_empty() {
+                request_sender.close();
             },
+            complete => break,
         }
     }
     println!("sum: {}", sum);
