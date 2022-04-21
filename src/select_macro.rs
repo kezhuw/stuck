@@ -1,22 +1,26 @@
-/// Select multiple channels simultaneously for sending and receiving.
+/// # Select multiple selectables simultaneously for reading and writing
 ///
-/// select! supports three different clauses for send, receive and default respectively.
+/// select! supports four different clauses:
 ///
-/// * pattern = <-receiver[, if condition] => code,
-/// * pattern = sender<-expression[, if condition] => code,
+/// * pattern = <-reader[, if condition] => code,
+/// * pattern = writer<-expression[, if condition] => code,
 /// * default => code,
+/// * complete => code,
 ///
 /// ## Restrictions
-/// * `sender` and `receiver` must be `mut` idents but not expressions.
+/// * `reader` and `writer` must be `mut` idents but not expressions.
 /// * `pattern` must be irrefutable.
 ///
 /// ## Evaluation
 /// * All conditions are evaluated before selection.
-/// * Send expression is only evaluated if that branch is selected.
-/// * `default` case is run if no other case is ready.
+/// * Expressions to `writer` are only evaluated if that branch is selected.
+/// * `complete` case is run if all selectables are disabled or completed.
+/// * `default` case is run if no selectable is ready, or all selectables are disabled or completed
+/// in absent of `complete`.
 ///
 /// ## Panics
-/// * Panic when all send and receive branches are disabled and there is no default case.
+/// * Panic when all selectables are disabled or completed and there is no `default` or `complete`.
+///
 /// ## Examples
 /// ```rust
 /// use stuck::channel::serial;
@@ -38,72 +42,82 @@
 ///     assert!(received);
 /// }
 /// ```
+#[macro_export]
+macro_rules! select {
+    ($($tokens:tt)*) => {
+        $crate::select_internal!(@list ($($tokens)*) ())
+    }
+}
 
-// @list list cases and normalize branch body to form `{ $body; }` with trailing comma.
-// @case pattern match cases and verify them
+// @list list branches and normalize branch body to form `{ $body; }` with trailing comma.
+// @case pattern match branches and verify them
 //
 // @init generate initialization code
 // @add prepare selectables and select for permit
-// @complete match selection to select branch for execution
+// @match match selection to select branch for execution
+#[doc(hidden)]
 #[macro_export]
-macro_rules! select {
+macro_rules! select_internal {
     (@list
         ()
         $cases:tt
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @case
             $cases
             ()
             ()
+            ()
+        )
+    };
+
+    // `complete` in last case.
+    (@list
+        (complete => $body:expr)
+        ($($cases:tt)*)
+    ) => {
+        $crate::select_internal!(
+            @list
+            ()
+            ($($cases)* complete => { $body; },)
+         )
+    };
+    // `complete` in no last case.
+    (@list
+        (complete => $body:expr, $($tokens:tt)*)
+        ($($cases:tt)*)
+    ) => {
+        $crate::select_internal!(
+            @list
+            ($($tokens)*)
+            ($($cases)* complete => { $body; },)
         )
     };
 
     // List default case.
 
-    // Last clause.
+    // `default` in last case
     (@list
         (default => $body:expr)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ()
             ($($cases)* default => { $body; },)
         )
     };
-    // No last clause.
+    // `default` in no last case
     (@list
         (default => $body:expr, $($tokens:tt)*)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ($($tokens)*)
             ($($cases)* default => { $body; },)
         )
     };
-    // // Expect `=>` after `default`.
-    // (@list
-    //     (default -> $($tokens:tt)*)
-    //     $cases:tt
-    // ) => {
-    //     compile_error!("expect `=>` after `default`, got `->`")
-    // };
-
-    // // Binding is mandatory.
-    // (@list
-    //     (recv($($args:tt)*) => $($unused:tt)*)
-    //     ($($cases:tt)*)
-    // ) => {
-    //     compile_error!("expect `->` after `recv`, got `=>`")
-    // };
-    // (@list
-    //     (send($($args:tt)*) => $($unused:tt)*)
-    //     ($($cases:tt)*)
-    // ) => {
-    //     compile_error!("expect `->` after `send`, got `=>`")
-    // };
 
     // List operation case. `block` is a special kind of `expr`, match it first.
 
@@ -112,7 +126,7 @@ macro_rules! select {
         ($bind:pat = <- $r:ident $(, if $pred:expr)? => $body:block, $($tokens:tt)*)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ($($tokens)*)
             ($($cases)* recv($r) -> $bind, [$($pred)*] => { $body; },)
@@ -123,7 +137,7 @@ macro_rules! select {
         ($bind:pat = <- $r:ident $(, if $pred:expr)? => $body:block $($tokens:tt)*)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ($($tokens)*)
             ($($cases)* recv($r) -> $bind, [$($pred)*] => { $body; },)
@@ -134,7 +148,7 @@ macro_rules! select {
         ($bind:pat = <- $r:ident $(, if $pred:expr)? => $body:expr)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ()
             ($($cases)* recv($r) -> $bind, [$($pred)*] => { $body; },)
@@ -145,7 +159,7 @@ macro_rules! select {
         ($bind:pat = <- $r:ident $(, if $pred:expr)? => $body:expr, $($tokens:tt)*)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ($($tokens)*)
             ($($cases)* recv($r) -> $bind, [$($pred)*] => { $body; },)
@@ -164,7 +178,7 @@ macro_rules! select {
         ($bind:pat = $sender:ident <- $value:expr $(, if $pred:expr)? => $body:block, $($tokens:tt)*)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ($($tokens)*)
             ($($cases)* send($sender, $value) -> $bind, [$($pred)*] => { $body; },)
@@ -175,7 +189,7 @@ macro_rules! select {
         ($bind:pat = $sender:ident <- $value:expr $(, if $pred:expr)? => $body:block $($tokens:tt)*)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ($($tokens)*)
             ($($cases)* send($sender, $value) -> $bind, [$($pred)*] => { $body; },)
@@ -186,7 +200,7 @@ macro_rules! select {
         ($bind:pat = $sender:ident <- $value:expr $(, if $pred:expr)? => $body:expr)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ()
             ($($cases)* send($sender, $value) -> $bind, [$($pred)*] => { $body; },)
@@ -197,7 +211,7 @@ macro_rules! select {
         ($bind:pat = $sender:ident <- $value:expr $(, if $pred:expr)? => $body:expr, $($tokens:tt)*)
         ($($cases:tt)*)
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @list
             ($($tokens)*)
             ($($cases)* send($sender, $value) -> $bind, [$($pred)*] => { $body; },)
@@ -211,51 +225,6 @@ macro_rules! select {
         compile_error!("expect `,` after expression in not last branch")
     };
 
-    // // Block with trailing comma.
-    // (@list
-    //     ($bind:pat = $operation:ident($($args:tt)*) $(, if $pred:expr)? => $body:block, $($tokens:tt)*)
-    //     ($($cases:tt)*)
-    // ) => {
-    //     $crate::select!(
-    //         @list
-    //         ($($tokens)*)
-    //         ($($cases)* $operation($($args)*) -> $bind, [$($pred)*] => { $body },)
-    //     )
-    // };
-    // // Block without trailing comma.
-    // (@list
-    //     ($bind:pat = $operation:ident($($args:tt)*) $(, if $pred:expr)? => $body:block $($tokens:tt)*)
-    //     ($($cases:tt)*)
-    // ) => {
-    //     $crate::select!(
-    //         @list
-    //         ($($tokens)*)
-    //         ($($cases)* $operation($($args)*) -> $bind, [$($pred)*] => { $body },)
-    //     )
-    // };
-    // // Comma is optional in last case.
-    // (@list
-    //     ($bind:pat = $operation:ident($($args:tt)*) $(, if $pred:expr)? => $body:expr)
-    //     ($($cases:tt)*)
-    // ) => {
-    //     $crate::select!(
-    //         @list
-    //         ()
-    //         ($($cases)* $operation($($args)*) -> $bind, [$($pred)?] => { $body },)
-    //     )
-    // };
-    // // Comma is mandatory in no last case.
-    // (@list
-    //     ($bind:pat = $operation:ident($($args:tt)*) $(, if $pred:expr)? => $body:expr, $($tokens:tt)*)
-    //     ($($cases:tt)*)
-    // ) => {
-    //     $crate::select!(
-    //         @list
-    //         ($($tokens)*)
-    //         ($($cases)* $operation($($args)*) -> $bind, [$($pred)*] => { $body },)
-    //     )
-    // };
-
     (@list
         ($($tokens:tt)*)
         ($($cases:tt)*)
@@ -266,103 +235,118 @@ macro_rules! select {
     // All cases are verified, let's generate code.
     (@case
         ()
-        $cases:tt
+        $branches:tt
         $default:tt
+        $complete:tt
     ) => {
-        $crate::select!(@init $cases $default)
+        $crate::select_internal!(@init $branches $default $complete)
     };
 
     // `default` case.
     (@case
-        (default => $body:tt, $($pendings:tt)*)
-        ($($cases:tt)*)
+        (default => $body:tt, $($cases:tt)*)
+        $branches:tt
         ()
+        $complete:tt
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @case
-            ($($pendings)*)
             ($($cases)*)
+            $branches
             (default => $body,)
+            $complete
         )
     };
-    // At most one default case.
+    // At most one `default` case.
     (@case
         (default $($unused:tt)*)
-        ($($cases:tt)*)
+        $branches:tt
         ($($def:tt)+)
+        $complete:tt
     ) => {
         compile_error!("more than one `default` case in `select` block")
     };
 
-    // Recv case.
+    // `complete` case.
     (@case
-        (recv($r:ident) -> $bind:pat, $pred:tt => $body:tt, $($pendings:tt)*)
-        ($($cases:tt)*)
+        (complete => $body:tt, $($cases:tt)*)
+        $branches:tt
         $default:tt
+        ()
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @case
-            ($($pendings)*)
-            ($($cases)* recv($r) -> $bind, $pred => $body,)
+            ($($cases)*)
+            $branches
             $default
+            (complete => $body,)
         )
     };
-    // // `recv` requires exact one argument.
-    // (@case
-    //     (recv($($args:tt)*) -> $bind:pat, $pred:tt => $body:tt, $($pendings:tt)*)
-    //     $cases:tt
-    //     $default:tt
-    // ) => {
-    //     compile_error!(concat!(
-    //         "expect one argument for `recv`, got: ",
-    //         stringify!($($args)*)
-    //     ))
-    // };
+    // At most one `complete` case.
+    (@case
+        (complete $($unused:tt)*)
+        ($($branches:tt)*)
+        $default:tt
+        ($($tok:tt)+)
+    ) => {
+        compile_error!("more than one `complete` case in `select` block")
+    };
+
+    // Recv case.
+    (@case
+        (recv($r:ident) -> $bind:pat, $pred:tt => $body:tt, $($cases:tt)*)
+        ($($branches:tt)*)
+        $default:tt
+        $complete:tt
+    ) => {
+        $crate::select_internal!(
+            @case
+            ($($cases)*)
+            ($($branches)* recv($r) -> $bind, $pred => $body,)
+            $default
+            $complete
+        )
+    };
 
     // Send case.
     (@case
-        (send($s:ident, $v:expr) -> $bind:pat, $pred:tt => $body:tt, $($pendings:tt)*)
-        ($($cases:tt)*)
+        (send($s:ident, $v:expr) -> $bind:pat, $pred:tt => $body:tt, $($cases:tt)*)
+        ($($branches:tt)*)
         $default:tt
+        $complete:tt
     ) => {
-        $crate::select!(
+        $crate::select_internal!(
             @case
-            ($($pendings)*)
-            ($($cases)* send($s, $v) -> $bind, $pred => $body,)
+            ($($cases)*)
+            ($($branches)* send($s, $v) -> $bind, $pred => $body,)
             $default
+            $complete
         )
     };
-    // // `send` requires exact two arguments.
-    // (@case
-    //     (send($($args:tt)*) -> $bind:pat, $pred:tt => $body:tt, $($pendings:tt)*)
-    //     $cases:tt
-    //     $default:tt
-    // ) => {
-    //     compile_error!(concat!("expect two argument for `send`, got: ", stringify!($($args)*)))
-    // };
-
-    // // Unknown operation.
-    // (@case
-    //     ($operation:ident $($tokens:tt)*)
-    //     $cases:tt
-    //     $default:tt
-    // ) => {
-    //     compile_error!(concat!("expect `recv` or `send`, got `", stringify!($operation), "`"))
-    // };
 
     // Init select.
     (@init
-        $cases:tt
+        $branches:tt
         $default:tt
+        $complete:tt
     ) => {{
-        use $crate::select::Select;
-        const _LEN: usize = $crate::select!(@count $cases);
+        #[allow(unused_imports)]
+        use $crate::select::Selectable as _;
+        #[allow(unused_imports)]
+        use $crate::select::Select as _;
+        #[allow(unused_imports)]
+        use $crate::select::PermitReader as _;
+        #[allow(unused_imports)]
+        use $crate::select::PermitWriter as _;
+
+        const _LEN: usize = $crate::select_internal!(@count $branches);
         let mut _selector: [Option<&'_ dyn $crate::select::Selectable>; _LEN] = [::std::option::Option::None; _LEN];
-        $crate::select!(
+        $crate::select_internal!(
             @add
             _selector
-            $cases
+            $branches
             $default
+            $complete
             (
                 (0x00usize)
                 (0x01usize)
@@ -406,38 +390,94 @@ macro_rules! select {
         $selector:ident
         ()
         ()
+        ()
         $lables:tt
-        $cases:tt
+        $candidates:tt
     ) => {{
-        let _selection = unsafe { $selector.select() };
-        $crate::select!(
-            @complete
-            $selector
-            _selection
-            $cases
-        )
+        if let Some(_selection) = unsafe { $selector.select() } {
+            $crate::select_internal!(
+                @match
+                $selector
+                _selection
+                $candidates
+            )
+        } else {
+            panic!("all selectables are disabled or completed and there is no `default` or `complete`");
+        }
     }};
 
-    // Try select!
+    // `select!` with `complete` branch
+    (@add
+        $selector:ident
+        ()
+        ()
+        (complete => $body:tt,)
+        $lables:tt
+        $candidates:tt
+    ) => {{
+        if let Some(_selection) = unsafe { $selector.select() } {
+            $crate::select_internal!(
+                @match
+                $selector
+                _selection
+                $candidates
+            )
+        } else {
+            $body
+        }
+    }};
+
+    // `select!` with `default` branch
     (@add
         $selector:ident
         ()
         (default => $body:tt,)
+        ()
         $lables:tt
-        $cases:tt
+        $candidates:tt
     ) => {{
-        let _selection = unsafe {  $selector.try_select() };
-        match _selection {
-            ::std::option::Option::None => {
-                { $selector };
+        let _result = unsafe {  $selector.try_select() };
+        { $selector };
+        match _result {
+            ::std::result::Result::Err(_) => {
                 $body
             },
-            ::std::option::Option::Some(_selection) => {
-                $crate::select!(
-                    @complete
+            ::std::result::Result::Ok(_selection) => {
+                $crate::select_internal!(
+                    @match
                     $selector
                     _selection
-                    $cases
+                    $candidates
+                )
+            }
+        }
+    }};
+
+    // `select!` with `default` and `complete` branch
+    (@add
+        $selector:ident
+        ()
+        (default => $default:tt,)
+        (complete => $complete:tt,)
+        $lables:tt
+        $candidates:tt
+    ) => {{
+        use $crate::select::TrySelectError;
+        let _result = unsafe {  $selector.try_select() };
+        { $selector };
+        match _result {
+            ::std::result::Result::Err(TrySelectError::Completed) => {
+                $complete
+            },
+            ::std::result::Result::Err(TrySelectError::WouldBlock) => {
+                $default
+            },
+            ::std::result::Result::Ok(_selection) => {
+                $crate::select_internal!(
+                    @match
+                    $selector
+                    _selection
+                    $candidates
                 )
             }
         }
@@ -446,10 +486,11 @@ macro_rules! select {
     // No remaining labels.
     (@add
         $selector:ident
-        $candidates:tt
+        $branches:tt
         $default:tt
+        $complete:tt
         ()
-        $cases:tt
+        $candidates:tt
     ) => {
         compile_error!("too many select! cases")
     };
@@ -457,10 +498,11 @@ macro_rules! select {
     // Select receiver.
     (@add
         $selector:ident
-        (recv($r:ident) -> $bind:pat, [$($pred:expr)?] => $body:tt, $($pendings:tt)*)
+        (recv($r:ident) -> $bind:pat, [$($pred:expr)?] => $body:tt, $($branches:tt)*)
         $default:tt
+        $complete:tt
         (($index:tt) $($labels:tt)*)
-        ($($cases:tt)*)
+        ($($candidates:tt)*)
     ) => {{
         let mut _enabled = true;
         $( _enabled = $pred; ) ?
@@ -469,23 +511,25 @@ macro_rules! select {
             let _ref = unsafe { ::std::mem::transmute::<&dyn $crate::select::Selectable, &'_ dyn $crate::select::Selectable>(_ref) };
             $selector[$index] = Some(_ref);
         }
-        $crate::select!(
+        $crate::select_internal!(
             @add
             $selector
-            ($($pendings)*)
+            ($($branches)*)
             $default
+            $complete
             ($($labels)*)
-            ($($cases)* [$index] recv($r) -> $bind => $body,)
+            ($($candidates)* [$index] recv($r) -> $bind => $body,)
         )
     }};
 
     // Select sender.
     (@add
         $selector:ident
-        (send($s:ident, $v:expr) -> $bind:pat, [$($pred:expr)?] => $body:tt, $($pendings:tt)*)
+        (send($s:ident, $v:expr) -> $bind:pat, [$($pred:expr)?] => $body:tt, $($branches:tt)*)
         $default:tt
+        $complete:tt
         (($index:tt) $($labels:tt)*)
-        ($($cases:tt)*)
+        ($($candidates:tt)*)
     ) => {{
         let mut _enabled = true;
         $( _enabled = $pred; ) ?
@@ -494,18 +538,19 @@ macro_rules! select {
             let _ref = unsafe { ::std::mem::transmute::<&dyn $crate::select::Selectable, &'_ dyn $crate::select::Selectable>(_ref) };
             $selector[$index] = Some(_ref);
         }
-        $crate::select!(
+        $crate::select_internal!(
             @add
             $selector
-            ($($pendings)*)
+            ($($branches)*)
             $default
+            $complete
             ($($labels)*)
-            ($($cases)* [$index] send($s, $v) -> $bind => $body,)
+            ($($candidates)* [$index] send($s, $v) -> $bind => $body,)
         )
     }};
 
     // Panic if no matching selectable.
-    (@complete
+    (@match
         $selector:ident
         $selection:ident
         ()
@@ -514,43 +559,43 @@ macro_rules! select {
     }};
 
     // Match a receive operation.
-    (@complete
+    (@match
         $selector:ident
         $selection:ident
-        ([$index:tt] recv($r:ident) -> $bind:pat => $body:tt, $($cases:tt)*)
+        ([$index:tt] recv($r:ident) -> $bind:pat => $body:tt, $($candidates:tt)*)
     ) => {{
         if $selection.0 == $index {
             { $selector };
-            use $crate::select::PermitReader as _;
             let $bind = $r.consume_permit($selection.1);
+            #[allow(unreachable_code)]
             $body
         } else {
-            $crate::select!(
-                @complete
+            $crate::select_internal!(
+                @match
                 $selector
                 $selection
-                ($($cases)*)
+                ($($candidates)*)
             )
         }
     }};
 
     // Match a send operation.
-    (@complete
+    (@match
         $selector:ident
         $selection:ident
-        ([$index:tt] send($s:ident, $v:expr) -> $bind:pat => $body:tt, $($cases:tt)*)
+        ([$index:tt] send($s:ident, $v:expr) -> $bind:pat => $body:tt, $($candidates:tt)*)
     ) => {{
         if $selection.0 == $index {
             { $selector };
-            use $crate::select::PermitWriter as _;
             let $bind = $s.consume_permit($selection.1, $v);
+            #[allow(unreachable_code)]
             $body
         } else {
-            $crate::select!(
-                @complete
+            $crate::select_internal!(
+                @match
                 $selector
                 $selection
-                ($($cases)*)
+                ($($candidates)*)
             )
         }
     }};
@@ -558,7 +603,7 @@ macro_rules! select {
     // Count select cases.
     (@count ()) => { 0 };
     (@count ($ident:ident $args:tt -> $bind:pat, $pred:tt => $body:tt, $($cases:tt)*)) => {
-        1 + $crate::select!(@count ($($cases)*))
+        1 + $crate::select_internal!(@count ($($cases)*))
     };
 
     // Entry points.
@@ -566,6 +611,6 @@ macro_rules! select {
         compile_error!("empty `select!` block")
     };
     ($($tokens:tt)*) => {
-        $crate::select!(@list ($($tokens)*) ())
+        $crate::select_internal!(@list ($($tokens)*) ())
     }
 }

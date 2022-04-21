@@ -11,7 +11,7 @@ use static_assertions::assert_not_impl_any;
 use crate::channel::prelude::*;
 use crate::channel::{self, SendError, TryRecvError, TrySendError};
 use crate::coroutine::{self, Resumption};
-use crate::select::{Identifier, Permit, PermitReader, PermitWriter, Selectable, Selector};
+use crate::select::{Identifier, Permit, PermitReader, PermitWriter, Selectable, Selector, TrySelectError};
 use crate::time;
 
 enum Waker {
@@ -308,24 +308,24 @@ impl<T: 'static> Selectable for Sender<T> {
         false
     }
 
-    fn select_permit(&self) -> Option<Permit> {
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
         if let Some(channel) = &self.channel {
             if channel.is_sendable() {
-                Some(Permit::default())
+                Ok(Permit::default())
             } else {
-                None
+                Err(TrySelectError::WouldBlock)
             }
         } else {
-            Some(Permit::default())
+            Ok(Permit::default())
         }
     }
 
-    fn watch_permit(&self, selector: Selector) -> Option<bool> {
+    fn watch_permit(&self, selector: Selector) -> bool {
         if let Some(channel) = &self.channel {
-            Some(channel.watch_sendable(selector))
+            channel.watch_sendable(selector)
         } else {
             selector.apply(Permit::default());
-            Some(true)
+            true
         }
     }
 
@@ -421,24 +421,24 @@ impl<T: 'static> Selectable for Receiver<T> {
         false
     }
 
-    fn select_permit(&self) -> Option<Permit> {
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
         if let Some(channel) = &self.channel {
             if channel.is_recvable() {
-                Some(Permit::default())
+                Ok(Permit::default())
             } else {
-                None
+                Err(TrySelectError::WouldBlock)
             }
         } else {
-            Some(Permit::default())
+            Ok(Permit::default())
         }
     }
 
-    fn watch_permit(&self, selector: Selector) -> Option<bool> {
+    fn watch_permit(&self, selector: Selector) -> bool {
         if let Some(channel) = &self.channel {
-            Some(channel.watch_recvable(selector))
+            channel.watch_recvable(selector)
         } else {
             selector.apply(Permit::default());
-            Some(true)
+            true
         }
     }
 

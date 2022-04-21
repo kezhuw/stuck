@@ -8,7 +8,7 @@ use static_assertions::assert_not_impl_any;
 
 use super::Coroutine;
 use crate::error::{JoinError, PanicError};
-use crate::select::{Identifier, Permit, PermitReader, Selectable, Selector};
+use crate::select::{Identifier, Permit, PermitReader, Selectable, Selector, TrySelectError};
 use crate::task::{self, Yielding};
 
 enum SuspensionState<T: 'static> {
@@ -289,12 +289,24 @@ impl<T: 'static> Selectable for JoinHandle<T> {
         false
     }
 
-    fn select_permit(&self) -> Option<Permit> {
-        self.suspension.as_ref().filter(|suspension| suspension.is_ready()).map(|_| Permit::default())
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
+        if let Some(suspension) = self.suspension.as_ref() {
+            if suspension.is_ready() {
+                Ok(Permit::default())
+            } else {
+                Err(TrySelectError::WouldBlock)
+            }
+        } else {
+            Err(TrySelectError::Completed)
+        }
     }
 
-    fn watch_permit(&self, selector: Selector) -> Option<bool> {
-        self.suspension.as_ref().map(|suspension| suspension.0.watch_permit(selector))
+    fn watch_permit(&self, selector: Selector) -> bool {
+        if let Some(suspension) = self.suspension.as_ref() {
+            suspension.0.watch_permit(selector)
+        } else {
+            false
+        }
     }
 
     fn unwatch_permit(&self, identifier: &Identifier) {
@@ -374,6 +386,18 @@ mod tests {
     }
 
     #[crate::test(crate = "crate")]
+    fn join_handle_select_complete() {
+        let mut join_handle = coroutine::spawn(|| 5);
+        select! {
+            r = <-join_handle => assert_eq!(r.unwrap(), 5),
+        }
+        select! {
+            r = <-join_handle => assert_eq!(r.unwrap(), 5),
+            complete => {},
+        }
+    }
+
+    #[crate::test(crate = "crate")]
     #[should_panic(expected = "already joined by select")]
     fn join_handle_join_consumed() {
         let mut join_handle = coroutine::spawn(|| 5);
@@ -384,7 +408,7 @@ mod tests {
     }
 
     #[crate::test(crate = "crate")]
-    #[should_panic(expected = "all select cases disabled with no `default`")]
+    #[should_panic(expected = "all selectables are disabled or completed")]
     fn join_handle_select_consumed() {
         let mut join_handle = coroutine::spawn(|| 5);
         select! {

@@ -194,6 +194,15 @@ impl<'a> Iterator for Enumerator<'a> {
     }
 }
 
+/// Error for [Select::try_select] and [Selectable::select_permit].
+pub enum TrySelectError {
+    /// No avaiable permit now.
+    WouldBlock,
+
+    /// All permits exhausted.
+    Completed,
+}
+
 /// Select candidate to read and/or write value in blocking or nonblocking.
 pub trait Select<'a> {
     /// Returns all selectable candidates.
@@ -203,52 +212,48 @@ pub trait Select<'a> {
     ///
     /// # Safety
     /// The returned permit must be consumed otherwise it leaked.
-    unsafe fn try_select(&'a self) -> Option<(usize, Permit)> {
+    unsafe fn try_select(&'a self) -> Result<(usize, Permit), TrySelectError> {
+        let mut err = TrySelectError::Completed;
         for (index, selectable) in Enumerator::new(self.selectables()) {
             if let Some(selectable) = selectable {
-                if let Some(permit) = selectable.select_permit() {
-                    return Some((index, permit));
+                match selectable.select_permit() {
+                    Ok(permit) => return Ok((index, permit)),
+                    Err(TrySelectError::WouldBlock) => err = TrySelectError::WouldBlock,
+                    Err(TrySelectError::Completed) => {},
                 }
             }
         }
-        None
+        Err(err)
     }
 
     /// Selects a permit for consumption.
     ///
     /// # Safety
     /// The returned permit must be consumed otherwise it leaked.
-    unsafe fn select(&'a self) -> (usize, Permit) {
-        if let Some(selection) = self.try_select() {
-            return selection;
+    unsafe fn select(&'a self) -> Option<(usize, Permit)> {
+        match self.try_select() {
+            Ok(selection) => return Some(selection),
+            Err(TrySelectError::Completed) => return None,
+            Err(TrySelectError::WouldBlock) => {},
         }
         let selectables = self.selectables();
         let parallel = selectables.iter().flatten().any(|s| s.parallel());
         let identifier = Identifier::new(&parallel as *const bool as *const ());
         let (waiter, waker) = Waker::new(parallel);
         let mut checked = 0;
-        let mut disabled = 0;
         let enumerator = Enumerator::new(selectables);
         for (index, selectable) in enumerator.clone() {
             if let Some(selectable) = selectable {
                 let selector = Selector::new(index, waker.clone(), identifier.copy());
-                match selectable.watch_permit(selector) {
-                    None => disabled += 1,
-                    Some(true) if waiter.is_ready() => break,
-                    _ => {},
+                if selectable.watch_permit(selector) && waiter.is_ready() {
+                    break;
                 }
-            } else {
-                disabled += 1;
             }
             checked += 1;
         }
-        // Check disabled before drop useless waker otherwise we will get different panic.
-        if disabled == selectables.len() {
-            panic!("all select cases disabled with no `default`");
-        }
         drop(waker);
         let waiter = WitnessWaiter::new(checked, waiter, identifier, enumerator);
-        waiter.wait()
+        Some(waiter.wait())
     }
 }
 
@@ -264,16 +269,12 @@ pub trait Selectable {
     fn parallel(&self) -> bool;
 
     /// Select for avaiable permit.
-    fn select_permit(&self) -> Option<Permit>;
+    fn select_permit(&self) -> Result<Permit, TrySelectError>;
 
     /// Watches for available permit.
     ///
-    /// # Returns
-    /// * `None` if all permits has been consumed and there is no meaningful closed value. The case
-    /// where this selectable is consulted will be treated as disabled.
-    /// * `Some(true)` if a permit is avaiable and applied.
-    /// * `Some(false)` no permit avaiable to consume.
-    fn watch_permit(&self, selector: Selector) -> Option<bool>;
+    /// If permit is avaiable now, applies it and returns true.
+    fn watch_permit(&self, selector: Selector) -> bool;
 
     /// Unwatches possible applied selector.
     fn unwatch_permit(&self, identifier: &Identifier);
@@ -304,11 +305,11 @@ where
         (**self).parallel()
     }
 
-    fn select_permit(&self) -> Option<Permit> {
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
         (**self).select_permit()
     }
 
-    fn watch_permit(&self, selector: Selector) -> Option<bool> {
+    fn watch_permit(&self, selector: Selector) -> bool {
         (**self).watch_permit(selector)
     }
 
@@ -325,11 +326,11 @@ where
         (**self).parallel()
     }
 
-    fn select_permit(&self) -> Option<Permit> {
+    fn select_permit(&self) -> Result<Permit, TrySelectError> {
         (**self).select_permit()
     }
 
-    fn watch_permit(&self, selector: Selector) -> Option<bool> {
+    fn watch_permit(&self, selector: Selector) -> bool {
         (**self).watch_permit(selector)
     }
 
@@ -421,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "all select cases disabled with no `default`")]
+    #[should_panic(expected = "all selectables are disabled or completed")]
     fn select_disabled() {
         let mut ready = serial::ready(());
         select! {
