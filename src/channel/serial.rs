@@ -481,6 +481,7 @@ pub fn unbounded<T: 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use ignore_result::Ignore;
     use more_asserts::{assert_ge, assert_le};
     use pretty_assertions::assert_eq;
 
@@ -687,5 +688,69 @@ mod tests {
             complete => {},
         }
         assert_eq!(receiver.recv(), None);
+    }
+
+    #[crate::test(crate = "crate")]
+    fn sender_select() {
+        let (mut sender1, receiver1) = bounded(1);
+        let (mut sender2, receiver2) = unbounded(1);
+
+        let task1 = coroutine::spawn(move || receiver1.into_iter().collect::<Vec<_>>());
+
+        let task2 = coroutine::spawn(move || receiver2.into_iter().collect::<Vec<_>>());
+
+        let mut values1 = VecDeque::from(vec![1, 3, 5]);
+        let mut values2 = VecDeque::from(vec![2, 4, 6]);
+
+        loop {
+            select! {
+                _ = sender1<-values1.pop_front().unwrap() => if values1.is_empty() {
+                    sender1.close();
+                },
+                _ = sender2<-values2.pop_front().unwrap() => if values2.is_empty() {
+                    sender2.close();
+                },
+                complete => break,
+            }
+        }
+
+        assert_eq!(task1.join().unwrap(), vec![1, 3, 5]);
+        assert_eq!(task2.join().unwrap(), vec![2, 4, 6]);
+    }
+
+    #[crate::test(crate = "crate")]
+    fn receiver_select() {
+        let (mut sender1, mut receiver1) = bounded(10);
+        let (mut sender2, mut receiver2) = unbounded(10);
+
+        coroutine::spawn(move || {
+            for v in vec![1, 3, 5] {
+                sender1.send(v).ignore();
+            }
+        });
+
+        coroutine::spawn(move || {
+            for v in vec![2, 4, 6] {
+                sender2.send(v).ignore();
+            }
+        });
+
+        let mut values1 = Vec::new();
+        let mut values2 = Vec::new();
+
+        loop {
+            select! {
+                r = <-receiver1 => if let Some(v) = r {
+                    values1.push(v);
+                },
+                r = <-receiver2 => if let Some(v) = r {
+                    values2.push(v);
+                },
+                complete => break,
+            }
+        }
+
+        assert_eq!(values1, vec![1, 3, 5]);
+        assert_eq!(values2, vec![2, 4, 6]);
     }
 }
