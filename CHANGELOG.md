@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Changed
 - Abstract operations for both serial and parallel channels
+- Construct Timer with alloc and Box::from_raw to avoid large stack requirement
 
 ## [0.3.0] - 2022-04-22
 ### Added
