@@ -72,9 +72,8 @@ impl Builder {
         let poller = net::Poller::new().unwrap();
         let scheduler = Scheduler::new(parallelism, time_sender.clone(), poller.registry());
         let stopper = poller.start().unwrap();
-        let timer = time::Timer::new();
         let timer = task::Builder::with_scheduler(&scheduler).spawn(move || {
-            time::timer(timer, time_receiver);
+            time::timer(time_receiver);
         });
         let ticker = thread::spawn(move || {
             time::tickr(time_sender);

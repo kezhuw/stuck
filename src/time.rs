@@ -1,4 +1,4 @@
-use std::mem::{forget, replace, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::ptr;
 use std::time::{Duration, Instant};
 
@@ -77,9 +77,12 @@ pub(crate) struct Timer {
 unsafe impl Send for Timer {}
 
 impl Timer {
-    // Expose to construct this struct in native thread to avoid stack overflow in coroutine stack.
-    pub fn new() -> Box<Timer> {
-        let mut timer: Box<Timer> = Box::new(unsafe { std::mem::zeroed() });
+    fn new() -> Box<Timer> {
+        use std::alloc::{alloc, Layout};
+        use std::mem::{forget, replace};
+
+        let raw = unsafe { alloc(Layout::new::<Timer>()) as *mut Timer };
+        let timer = unsafe { &mut *raw };
         timer.time = 0;
         for list in timer.least.iter_mut() {
             forget(replace(&mut list.first, None));
@@ -92,7 +95,7 @@ impl Timer {
             }
         }
         forget(replace(&mut timer.nodes, None));
-        timer
+        unsafe { Box::from_raw(raw) }
     }
 
     fn new_node(&mut self) -> Box<Node> {
@@ -233,7 +236,8 @@ pub(crate) fn tickr(mut sender: Sender<Message>) {
     }
 }
 
-pub(crate) fn timer(mut timer: Box<Timer>, mut receiver: Receiver<Message>) {
+pub(crate) fn timer(mut receiver: Receiver<Message>) {
+    let mut timer = Timer::new();
     while let Some(message) = receiver.recv() {
         match message {
             // Plus one minimum resolution to avoid earlier wakeup due to partially elapsed tick.
