@@ -6,10 +6,11 @@ use std::rc::Rc;
 
 use static_assertions::assert_not_impl_any;
 
+use super::shared::Permit;
 use crate::channel::prelude::*;
 use crate::channel::{self, SendError, TryRecvError, TrySendError};
 use crate::coroutine::{self, Resumption};
-use crate::select::{Identifier, Permit, PermitReader, PermitWriter, Selectable, Selector, TrySelectError};
+use crate::select::{self, Identifier, PermitReader, PermitWriter, Selectable, Selector, TrySelectError};
 
 enum Waker {
     Selector(Selector),
@@ -31,7 +32,7 @@ impl From<Selector> for Waker {
 impl Waker {
     fn wake(self) -> bool {
         match self {
-            Waker::Selector(selector) => selector.apply(Permit::default()),
+            Waker::Selector(selector) => selector.apply(Permit::Consume.into()),
             Waker::Resumption(resumption) => {
                 resumption.resume(());
                 true
@@ -188,28 +189,28 @@ impl<T: 'static> Channel<T> {
         state.is_recvable()
     }
 
-    fn watch_sendable(&self, watcher: Selector) -> bool {
+    fn watch_send_permit(&self, watcher: Selector) -> bool {
         assert!(!self.is_sendable(), "wait on sendable channel");
         let mut state = self.state.borrow_mut();
         state.senders.push_back(Waker::from(watcher));
         true
     }
 
-    fn watch_recvable(&self, selector: Selector) -> bool {
+    fn watch_recv_permit(&self, selector: Selector) -> bool {
         assert!(!self.is_recvable(), "wait on recvable channel");
         let mut state = self.state.borrow_mut();
         state.receivers.push_back(Waker::from(selector));
         true
     }
 
-    fn unwatch_sendable(&self, identifier: &Identifier) {
+    fn unwatch_send_permit(&self, identifier: &Identifier) {
         let mut state = self.state.borrow_mut();
         if let Some(position) = state.senders.iter().position(|w| w.matches(identifier)) {
             state.senders.remove(position);
         }
     }
 
-    fn unwatch_recvable(&self, identifier: &Identifier) {
+    fn unwatch_recv_permit(&self, identifier: &Identifier) {
         let mut state = self.state.borrow_mut();
         if let Some(position) = state.receivers.iter().position(|w| w.matches(identifier)) {
             state.receivers.remove(position);
@@ -235,68 +236,108 @@ impl<T: 'static> Channel<T> {
     }
 }
 
-/// Sending peer of [Receiver]. Additional senders could be constructed by [Sender::clone].
-pub struct Sender<T: 'static> {
-    channel: Option<Rc<Channel<T>>>,
+impl<T> super::shared::Channel<T> for Rc<Channel<T>> {
+    fn send(&self, trying: bool, value: T) -> Result<(), TrySendError<T>> {
+        Channel::send(self, trying, value)
+    }
+
+    fn add_sender(&self) {
+        Channel::add_sender(self)
+    }
+
+    fn remove_sender(&self) {
+        Channel::remove_sender(self)
+    }
+
+    fn select_send_permit(&self) -> Option<Permit> {
+        if self.is_sendable() {
+            Some(Permit::Consume)
+        } else {
+            None
+        }
+    }
+
+    fn consume_send_permit(&self, value: T) -> Result<(), SendError<T>> {
+        match self.send(true, value) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Closed(value)) => Err(SendError::Closed(value)),
+            Err(TrySendError::Full(_)) => panic!("not ready to send"),
+        }
+    }
+
+    fn watch_send_permit(&self, selector: Selector) -> bool {
+        Channel::watch_send_permit(self, selector)
+    }
+
+    fn unwatch_send_permit(&self, identifier: &Identifier) {
+        Channel::unwatch_send_permit(self, identifier)
+    }
+
+    fn recv(&self, trying: bool) -> Result<T, TryRecvError> {
+        Channel::recv(self, trying)
+    }
+
+    fn add_receiver(&self) {
+        Channel::add_receiver(self)
+    }
+
+    fn remove_receiver(&self) {
+        Channel::remove_receiver(self)
+    }
+
+    fn select_recv_permit(&self) -> Option<Permit> {
+        if self.is_recvable() {
+            Some(Permit::Consume)
+        } else {
+            None
+        }
+    }
+
+    fn consume_recv_permit(&self) -> Option<T> {
+        match self.recv(true) {
+            Ok(value) => Some(value),
+            Err(TryRecvError::Empty) => panic!("not ready to recv"),
+            Err(TryRecvError::Closed) => None,
+        }
+    }
+
+    fn watch_recv_permit(&self, selector: Selector) -> bool {
+        Channel::watch_recv_permit(self, selector)
+    }
+
+    fn unwatch_recv_permit(&self, identifier: &Identifier) {
+        Channel::unwatch_recv_permit(self, identifier)
+    }
+
+    fn close(&self) {
+        Channel::close(self)
+    }
 }
+
+/// Sending peer of [Receiver]. Additional senders could be constructed by [Sender::clone].
+pub struct Sender<T: 'static>(super::shared::Sender<T, Rc<Channel<T>>>);
 
 impl<T: 'static> channel::Sender<T> for Sender<T> {
     fn send(&mut self, value: T) -> Result<(), SendError<T>> {
-        if let Some(channel) = &self.channel {
-            return match channel.send(false, value) {
-                Ok(_) => Ok(()),
-                Err(TrySendError::Full(_)) => unreachable!("got full in blocking send"),
-                Err(TrySendError::Closed(value)) => {
-                    channel.remove_sender();
-                    self.channel = None;
-                    Err(SendError::Closed(value))
-                },
-            };
-        }
-        Err(SendError::Closed(value))
+        self.0.send(value)
     }
 
     fn try_send(&mut self, value: T) -> Result<(), TrySendError<T>> {
-        if let Some(channel) = &self.channel {
-            return match channel.send(true, value) {
-                Ok(_) => Ok(()),
-                err @ Err(TrySendError::Full(_)) => err,
-                err @ Err(TrySendError::Closed(_)) => {
-                    channel.remove_sender();
-                    self.channel = None;
-                    err
-                },
-            };
-        }
-        Err(TrySendError::Closed(value))
+        self.0.try_send(value)
     }
 
     fn close(&mut self) {
-        if let Some(channel) = self.channel.take() {
-            channel.remove_sender();
-        }
+        self.0.close()
     }
 
     fn is_closed(&self) -> bool {
-        self.channel.is_none()
+        self.0.is_closed()
     }
 }
 
 impl<T: 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        match &self.channel {
-            None => Sender { channel: None },
-            Some(channel) => {
-                channel.add_sender();
-                Sender { channel: Some(channel.clone()) }
-            },
-        }
-    }
-}
-
-impl<T: 'static> Drop for Sender<T> {
-    fn drop(&mut self) {
-        self.close();
+        Sender(self.0.clone())
     }
 }
 
@@ -305,26 +346,16 @@ impl<T: 'static> Selectable for Sender<T> {
         false
     }
 
-    fn select_permit(&self) -> Result<Permit, TrySelectError> {
-        if let Some(channel) = &self.channel {
-            if channel.is_sendable() {
-                Ok(Permit::default())
-            } else {
-                Err(TrySelectError::WouldBlock)
-            }
-        } else {
-            Err(TrySelectError::Completed)
-        }
+    fn select_permit(&self) -> Result<select::Permit, TrySelectError> {
+        self.0.select_permit()
     }
 
     fn watch_permit(&self, selector: Selector) -> bool {
-        self.channel.as_ref().map(|channel| channel.watch_sendable(selector)).unwrap_or(false)
+        self.0.watch_permit(selector)
     }
 
     fn unwatch_permit(&self, identifier: &Identifier) {
-        if let Some(channel) = &self.channel {
-            channel.unwatch_sendable(identifier);
-        }
+        self.0.unwatch_permit(identifier)
     }
 }
 
@@ -332,88 +363,39 @@ impl<T: 'static> PermitWriter for Sender<T> {
     type Item = T;
     type Result = Result<(), SendError<T>>;
 
-    fn consume_permit(&mut self, _permit: Permit, value: Self::Item) -> Self::Result {
-        match self.try_send(value) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => panic!("send not ready"),
-            Err(TrySendError::Closed(value)) => Err(SendError::Closed(value)),
-        }
+    fn consume_permit(&mut self, permit: select::Permit, value: Self::Item) -> Self::Result {
+        self.0.consume_permit(permit, value)
     }
 }
 
 /// Receiving peer of [Sender].
-pub struct Receiver<T: 'static> {
-    channel: Option<Rc<Channel<T>>>,
-}
-
-impl<T: 'static> Receiver<T> {
-    /// Terminate this receiver for receiving values.
-    pub fn terminate(&mut self) {
-        if let Some(channel) = self.channel.take() {
-            channel.remove_receiver();
-        }
-    }
-}
+pub struct Receiver<T: 'static>(super::shared::Receiver<T, Rc<Channel<T>>>);
 
 impl<T: 'static> channel::Receiver<T> for Receiver<T> {
     fn recv(&mut self) -> Option<T> {
-        if let Some(channel) = &self.channel {
-            return match channel.recv(false) {
-                Ok(value) => Some(value),
-                Err(TryRecvError::Empty) => unreachable!("got empty in blocking recv"),
-                Err(TryRecvError::Closed) => {
-                    channel.remove_receiver();
-                    self.channel = None;
-                    None
-                },
-            };
-        }
-        None
+        self.0.recv()
     }
 
     fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        if let Some(channel) = &self.channel {
-            return match channel.recv(true) {
-                ok @ Ok(_) => ok,
-                err @ Err(TryRecvError::Empty) => err,
-                err @ Err(TryRecvError::Closed) => {
-                    channel.remove_receiver();
-                    self.channel = None;
-                    err
-                },
-            };
-        }
-        Err(TryRecvError::Closed)
+        self.0.try_recv()
     }
 
     fn close(&mut self) {
-        if let Some(channel) = &self.channel {
-            channel.close();
-        }
+        self.0.close()
+    }
+
+    fn terminate(&mut self) {
+        self.0.terminate()
     }
 
     fn is_drained(&self) -> bool {
-        self.channel.is_none()
+        self.0.is_drained()
     }
 }
 
 impl<T: 'static> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        match self.channel {
-            None => Receiver { channel: None },
-            Some(ref channel) => {
-                channel.add_receiver();
-                Receiver { channel: Some(channel.clone()) }
-            },
-        }
-    }
-}
-
-impl<T: 'static> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        if let Some(channel) = self.channel.take() {
-            channel.remove_receiver();
-        }
+        Receiver(self.0.clone())
     }
 }
 
@@ -422,38 +404,24 @@ impl<T: 'static> Selectable for Receiver<T> {
         false
     }
 
-    fn select_permit(&self) -> Result<Permit, TrySelectError> {
-        if let Some(channel) = &self.channel {
-            if channel.is_recvable() {
-                Ok(Permit::default())
-            } else {
-                Err(TrySelectError::WouldBlock)
-            }
-        } else {
-            Err(TrySelectError::Completed)
-        }
+    fn select_permit(&self) -> Result<select::Permit, TrySelectError> {
+        self.0.select_permit()
     }
 
     fn watch_permit(&self, selector: Selector) -> bool {
-        self.channel.as_ref().map(|channel| channel.watch_recvable(selector)).unwrap_or(false)
+        self.0.watch_permit(selector)
     }
 
     fn unwatch_permit(&self, identifier: &Identifier) {
-        if let Some(channel) = &self.channel {
-            channel.unwatch_recvable(identifier);
-        }
+        self.0.unwatch_permit(identifier)
     }
 }
 
 impl<T: 'static> PermitReader for Receiver<T> {
     type Result = Option<T>;
 
-    fn consume_permit(&mut self, _permit: Permit) -> Self::Result {
-        match self.try_recv() {
-            Ok(value) => Some(value),
-            Err(TryRecvError::Empty) => panic!("recv not ready"),
-            Err(TryRecvError::Closed) => None,
-        }
+    fn consume_permit(&mut self, permit: select::Permit) -> Self::Result {
+        self.0.consume_permit(permit)
     }
 }
 
@@ -486,15 +454,15 @@ impl<T: 'static> std::iter::FusedIterator for IntoIter<T> {}
 
 fn channel<T: 'static>(capacity: usize, bound: usize) -> (Sender<T>, Receiver<T>) {
     let channel = Channel::new(capacity, bound);
-    let sender = Sender { channel: Some(channel.clone()) };
-    let receiver = Receiver { channel: Some(channel) };
+    let sender = Sender(super::shared::Sender::new(channel.clone()));
+    let receiver = Receiver(super::shared::Receiver::new(channel));
     (sender, receiver)
 }
 
 /// Constructs a pair of completed sender and receiver.
 pub fn completed<T: 'static>() -> (Sender<T>, Receiver<T>) {
-    let sender = Sender { channel: None };
-    let receiver = Receiver { channel: None };
+    let sender = Sender(super::shared::Sender::empty());
+    let receiver = Receiver(super::shared::Receiver::empty());
     (sender, receiver)
 }
 
