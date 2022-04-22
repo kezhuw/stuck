@@ -4,6 +4,7 @@ mod error;
 pub mod parallel;
 pub mod prelude;
 pub mod serial;
+mod shared;
 
 pub use self::error::{SendError, TryRecvError, TrySendError};
 
@@ -41,6 +42,9 @@ pub trait Receiver<T> {
 
     /// Closes this channel for future sending.
     fn close(&mut self);
+
+    /// Terminate this receiver for future receiving. [Receiver::is_drained] will return `true`.
+    fn terminate(&mut self);
 
     /// Returns true if channel is closed and has no buffered values.
     ///
