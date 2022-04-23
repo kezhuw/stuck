@@ -1,9 +1,10 @@
 # stuck
 
-[![crates.io](https://img.shields.io/crates/v/stuck?style=for-the-badge)](https://crates.io/crates/stuck)
-[![docs.rs](https://img.shields.io/docsrs/stuck?style=for-the-badge)](https://docs.rs/stuck)
-[![github-ci](https://img.shields.io/github/workflow/status/kezhuw/stuck/CI?style=for-the-badge)](https://github.com/kezhuw/stuck/actions)
-[![mit-license](https://img.shields.io/github/license/kezhuw/stuck?style=for-the-badge)](LICENSE)
+[![crates.io](https://img.shields.io/crates/v/stuck)](https://crates.io/crates/stuck)
+[![github-ci](https://github.com/kezhuw/stuck/actions/workflows/ci.yml/badge.svg?event=push)](https://github.com/kezhuw/stuck/actions)
+[![codecov](https://codecov.io/gh/kezhuw/stuck/branch/master/graph/badge.svg?token=ZZ7LCNKQWQ)](https://codecov.io/gh/kezhuw/stuck)
+[![docs.rs](https://img.shields.io/docsrs/stuck)](https://docs.rs/stuck)
+[![mit-license](https://img.shields.io/github/license/kezhuw/stuck)](LICENSE)
 
 Stuck is a multi-threading scheduled task facility building on cooperative stackful coroutine.
 
