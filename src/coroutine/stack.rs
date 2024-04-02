@@ -48,6 +48,7 @@ impl Stack {
         self.base
     }
 
+    #[allow(clippy::unnecessary_cast)]
     pub fn size(&self) -> usize {
         self.size as usize
     }

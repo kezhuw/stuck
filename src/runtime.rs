@@ -14,7 +14,7 @@ use crate::task::{self, SchedFlow, Task};
 use crate::{net, time};
 
 thread_local! {
-    static SCHEDULER: Cell<Option<ptr::NonNull<Scheduler>>> = Cell::new(None);
+    static SCHEDULER: Cell<Option<ptr::NonNull<Scheduler>>> = const {  Cell::new(None) };
 }
 
 const STOP_MSG: &str = "runtime stopped";
@@ -32,11 +32,12 @@ impl TaskPointer {
 struct Scope {}
 
 impl Scope {
-    fn enter(scheduler: &Scheduler) {
+    fn enter(scheduler: &Scheduler) -> Self {
         SCHEDULER.with(|cell| {
             assert!(cell.get().is_none(), "runtime scheduler existed");
             cell.set(Some(ptr::NonNull::from(scheduler)));
         });
+        Scope {}
     }
 }
 

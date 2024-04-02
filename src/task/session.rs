@@ -165,7 +165,9 @@ impl<T: Send + 'static> SessionJoint<T> {
                 continue;
             }
             let cell = unsafe { &mut *self.state.get() };
-            unsafe { ManuallyDrop::take(&mut cell.value) };
+            unsafe {
+                let _ = ManuallyDrop::take(&mut cell.value);
+            }
         }
         // We could be in joining due to task abortion. Nothing to reclaim for joining state.
     }
@@ -388,9 +390,11 @@ pub struct SessionWaker<T: Send + 'static> {
     marker: PhantomData<Sendable>,
 }
 
+#[allow(dead_code)]
 struct NotSendable(std::rc::Rc<()>);
 assert_not_impl_any!(NotSendable: Send, Sync);
 
+#[allow(dead_code)]
 struct Sendable(std::rc::Rc<()>);
 unsafe impl Send for Sendable {}
 assert_impl_all!(Sendable: Send);

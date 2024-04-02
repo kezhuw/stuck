@@ -15,7 +15,7 @@ pub use self::suspension::{suspension, JoinHandle, Resumption, Suspension};
 use crate::task;
 
 thread_local! {
-    static COROUTINE: Cell<Option<ptr::NonNull<Coroutine>>> = Cell::new(None);
+    static COROUTINE: Cell<Option<ptr::NonNull<Coroutine>>> = const {  Cell::new(None) };
     static THREAD_CONTEXT: UnsafeCell<Context> = UnsafeCell::new(Context::empty());
 }
 

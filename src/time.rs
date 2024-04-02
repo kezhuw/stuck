@@ -79,22 +79,22 @@ unsafe impl Send for Timer {}
 impl Timer {
     fn new() -> Box<Timer> {
         use std::alloc::{alloc, Layout};
-        use std::mem::{forget, replace};
+        use std::mem::forget;
 
         let raw = unsafe { alloc(Layout::new::<Timer>()) as *mut Timer };
         let timer = unsafe { &mut *raw };
         timer.time = 0;
         for list in timer.least.iter_mut() {
-            forget(replace(&mut list.first, None));
+            forget(list.first.take());
             list.last = ptr::NonNull::from(&list.first);
         }
         for level in timer.level.iter_mut() {
             for list in level.iter_mut() {
-                forget(replace(&mut list.first, None));
+                forget(list.first.take());
                 list.last = ptr::NonNull::from(&list.first);
             }
         }
-        forget(replace(&mut timer.nodes, None));
+        forget(timer.nodes.take());
         unsafe { Box::from_raw(raw) }
     }
 
@@ -103,7 +103,7 @@ impl Timer {
             self.nodes = node.next.take();
             return node;
         }
-        Box::new(Node::default())
+        Box::default()
     }
 
     fn free_node(&mut self, mut node: Box<Node>) {
@@ -183,7 +183,7 @@ impl Timer {
 
     fn timeout(&mut self, timeout: u64, session: SessionWaker<()>) {
         let mut node = self.new_node();
-        node.expire = self.time + timeout as u64;
+        node.expire = self.time + timeout;
         node.session.write(session);
         self.queue_node(node);
     }
@@ -345,9 +345,8 @@ impl PermitReader for After {
     type Result = ();
 
     fn consume_permit(&mut self, permit: Permit) -> Self::Result {
-        let value = self.receiver.consume_permit(permit).expect("runtime stopping");
+        self.receiver.consume_permit(permit).expect("runtime stopping");
         self.receiver.terminate();
-        value
     }
 }
 

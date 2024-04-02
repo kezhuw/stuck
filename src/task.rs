@@ -19,7 +19,7 @@ mod session;
 static TID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
-    static TASK: Cell<Option<ptr::NonNull<Task>>> = Cell::new(None);
+    static TASK: Cell<Option<ptr::NonNull<Task>>> = const {  Cell::new(None) };
 }
 
 pub(crate) fn task() -> Option<ptr::NonNull<Task>> {
