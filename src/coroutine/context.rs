@@ -9,12 +9,18 @@ extern "C" {
     fn makecontext(ucp: *mut libc::ucontext_t, func: extern "C" fn(*mut libc::c_void), argc: libc::c_int, ...);
 }
 
+#[repr(C)]
 pub struct Context {
     stack: Stack,
     context: libc::ucontext_t,
-    // Seems that libc::ucontext_t does not list all possible members. Add padding to avoid crash.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    _padding: [u8; 256],
+    // macOS and its siblings embed mcontext inside ucontext while libc crate did not include them.
+    // See following links for details.
+    //
+    // * https://github.com/rust-lang/libc/issues/2812
+    // * https://github.com/rust-lang/libc/pull/2817
+    // * https://github.com/rust-lang/libc/pull/3312
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))]
+    _mcontext: libc::__darwin_mcontext64,
 }
 
 #[derive(Debug)]
