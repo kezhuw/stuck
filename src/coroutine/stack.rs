@@ -1,16 +1,41 @@
 use std::alloc;
+use std::sync::OnceLock;
 
 use super::page_size;
 
 /// StackSize specifies desired stack size for new task.
 ///
-/// It defaults to `16` times page size or [libc::MINSIGSTKSZ] depending on which one is bigger.
+/// It defaults to what environment variable `STUCK_STACK_SIZE` specifies and
+/// 32KiB in 32-bit systems and 1MiB in 64-bit systems in case of absent.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct StackSize {
     size: isize,
 }
 
 impl StackSize {
+    #[cfg(target_pointer_width = "64")]
+    fn default_size() -> usize {
+        // 1MiB
+        Self::align_to_page_size(1024 * 1024)
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    fn default_size() -> usize {
+        // 32KiB
+        Self::align_to_page_size(32 * 1024)
+    }
+
+    fn global_size() -> usize {
+        static STACK_SIZE: OnceLock<usize> = OnceLock::new();
+        *STACK_SIZE.get_or_init(|| match std::env::var("STUCK_STACK_SIZE") {
+            Err(_) => Self::default_size(),
+            Ok(val) => match val.parse::<usize>() {
+                Err(_) | Ok(0) => Self::default_size(),
+                Ok(n) => Self::align_to_page_size(n),
+            },
+        })
+    }
+
     fn align_to_page_size(size: usize) -> usize {
         let mask = page_size::get() - 1;
         (size + mask) & !mask
@@ -18,8 +43,8 @@ impl StackSize {
 
     fn aligned_page_size(&self) -> usize {
         let size = match self.size {
-            0 => 16 * page_size::get(),
-            1.. => 16 * page_size::get() + Self::align_to_page_size(self.size as usize),
+            0 => Self::global_size(),
+            1.. => Self::global_size() + Self::align_to_page_size(self.size as usize),
             _ => Self::align_to_page_size((-self.size) as usize),
         };
         size.max(libc::MINSIGSTKSZ)
