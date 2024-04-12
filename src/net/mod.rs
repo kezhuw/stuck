@@ -131,9 +131,12 @@ impl Poller {
 
     pub fn start(mut self) -> io::Result<Stopper> {
         let waker = Waker::new(self.poll.registry(), WAKER_TOKEN)?;
-        let handle = thread::spawn(move || {
-            self.serve().unwrap();
-        });
+        let handle = thread::Builder::new()
+            .name("stuck::net::poller".to_string())
+            .spawn(move || {
+                self.serve().unwrap();
+            })
+            .expect("failt to spawn stuck::net::poller thread");
         Ok(Stopper { waker, thread: Some(handle) })
     }
 

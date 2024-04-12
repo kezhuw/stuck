@@ -75,9 +75,12 @@ impl Builder {
         let timer = task::Builder::with_scheduler(&scheduler).spawn(move || {
             time::timer(time_receiver);
         });
-        let ticker = thread::spawn(move || {
-            time::tickr(time_sender);
-        });
+        let ticker = thread::Builder::new()
+            .name("stuck::time::ticker".to_string())
+            .spawn(move || {
+                time::tickr(time_sender);
+            })
+            .expect("failed to spawn stuck::time::ticker thread");
         let scheduling_threads = Scheduler::start(&scheduler);
         Runtime {
             scheduler,
@@ -188,9 +191,13 @@ impl Scheduler {
     fn start(self: &Arc<Scheduler>) -> Vec<thread::JoinHandle<()>> {
         let parallelism = self.parallelism;
         (0..parallelism)
-            .map(move |_| {
+            .map(move |i| {
                 let scheduler = self.clone();
-                thread::spawn(move || scheduler.serve())
+                let name = format!("stuck::scheduler({}/{})", i + 1, parallelism);
+                thread::Builder::new()
+                    .name(name)
+                    .spawn(move || scheduler.serve())
+                    .expect("failed to spawn stuck::scheduler thread")
             })
             .collect()
     }
