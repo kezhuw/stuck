@@ -1,4 +1,5 @@
-use std::alloc;
+use std::io::Error;
+use std::ptr;
 use std::sync::OnceLock;
 
 use super::page_size;
@@ -68,6 +69,13 @@ pub(crate) struct Stack {
     size: libc::size_t,
 }
 
+mod libc {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))]
+    pub const MAP_STACK: libc::c_int = 0;
+    #[allow(unused_imports)]
+    pub use libc::*;
+}
+
 impl Stack {
     pub fn base(&self) -> *mut u8 {
         self.base
@@ -82,13 +90,18 @@ impl Stack {
         let page_size = page_size::get();
         let stack_size = size.aligned_page_size();
         let alloc_size = stack_size + 2 * page_size;
-        let layout = unsafe { alloc::Layout::from_size_align_unchecked(alloc_size, page_size) };
-        let stack_low = unsafe { alloc::alloc(layout) };
-        let stack_base = unsafe { stack_low.add(page_size) };
-        let stack_high = unsafe { stack_base.add(stack_size) };
-        unsafe { libc::mprotect(stack_low as *mut libc::c_void, page_size, libc::PROT_NONE) };
-        unsafe { libc::mprotect(stack_high as *mut libc::c_void, page_size, libc::PROT_NONE) };
-        Stack { base: stack_base, size: stack_size }
+
+        let flags = libc::MAP_STACK | libc::MAP_ANONYMOUS | libc::MAP_PRIVATE;
+        let low = unsafe { libc::mmap(ptr::null_mut(), alloc_size, libc::PROT_NONE, flags, -1, 0) as *mut u8 };
+        if low as *mut libc::c_void == libc::MAP_FAILED {
+            panic!("failed to alloc stack with mmap: {:?}", Error::last_os_error())
+        }
+
+        let base = unsafe { low.add(page_size) };
+        if unsafe { libc::mprotect(base as *mut libc::c_void, stack_size, libc::PROT_READ | libc::PROT_WRITE) } != 0 {
+            panic!("failed to make stack read and write: {:?}", Error::last_os_error())
+        }
+        Stack { base, size: stack_size }
     }
 }
 
@@ -98,14 +111,11 @@ impl Drop for Stack {
             return;
         }
         let page_size = page_size::get();
-        let alloc_size = self.size + 2 * page_size;
+        let alloc_size = self.size() + 2 * page_size;
         let low = unsafe { self.base.sub(page_size) };
-        let high = unsafe { self.base.add(self.size) };
-        let prot = libc::PROT_READ | libc::PROT_WRITE;
-        unsafe { libc::mprotect(low as *mut libc::c_void, page_size, prot) };
-        unsafe { libc::mprotect(high as *mut libc::c_void, page_size, prot) };
-        let layout = unsafe { alloc::Layout::from_size_align_unchecked(alloc_size, page_size) };
-        unsafe { alloc::dealloc(low, layout) };
+        if unsafe { libc::munmap(low as *mut libc::c_void, alloc_size) } != 0 {
+            panic!("failed to drop stack with munmap: {:?}", Error::last_os_error())
+        }
     }
 }
 
