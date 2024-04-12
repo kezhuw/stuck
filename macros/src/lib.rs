@@ -101,6 +101,7 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
 
     let crate_name = config.crate_name.unwrap_or_else(|| Ident::new("stuck", Span::call_site()));
     let parallelism = config.parallelism.unwrap_or(0);
+    let parallelism_default: usize = if is_test { 2 } else { 0 };
     let result = quote! {
         #header
         #(#attrs)*
@@ -109,9 +110,20 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
                 #body
             }
 
+            let parallelism = match #parallelism {
+                0 => match std::env::var("STUCK_PARALLELISM_DEFAULT") {
+                    ::std::result::Result::Err(_) => #parallelism_default,
+                    ::std::result::Result::Ok(val) => match val.parse::<usize>() {
+                        ::std::result::Result::Err(_) => #parallelism_default,
+                        ::std::result::Result::Ok(n) => n,
+                    }
+                }
+                n => n,
+            };
+
             let mut builder = #crate_name::runtime::Builder::default();
-            if #parallelism != 0 {
-                builder.parallelism(#parallelism);
+            if parallelism != 0 {
+                builder.parallelism(parallelism);
             }
             let mut runtime = builder.build();
             let task = runtime.spawn(entry);
@@ -125,7 +137,9 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
 /// Executes marked main function in configured runtime.
 ///
 /// ## Options
-/// * `parallelism`: positive integer to specify parallelism for runtime scheduler
+/// * `parallelism`: positive integer to specify parallelism for runtime scheduler. Defaults to
+///   what environment variable `STUCK_PARALLELISM_DEFAULT` specifies and `2` for test environments
+///   if no valid environment variable value specified.
 ///
 /// ## Examples
 /// ```rust
