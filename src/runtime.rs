@@ -57,7 +57,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// Specifies the number of parallel threads for scheduling.
+    /// Specifies the number of parallel threads for scheduling. Defaults to [std::thread::available_parallelism].
     pub fn parallelism(&mut self, n: usize) -> &mut Self {
         assert!(n > 0, "parallelism must not be zero");
         self.parallelism = Some(n);
@@ -66,9 +66,8 @@ impl Builder {
 
     /// Constructs an [Runtime] to spawn and schedule tasks.
     pub fn build(&mut self) -> Runtime {
-        let parallelism = self
-            .parallelism
-            .unwrap_or_else(|| thread::available_parallelism().unwrap_or(NonZeroUsize::new(4).unwrap()).get());
+        let parallelism =
+            self.parallelism.unwrap_or_else(|| thread::available_parallelism().map_or(4, NonZeroUsize::get));
         let (time_sender, time_receiver) = parallel::unbounded(512);
         let poller = net::Poller::new().unwrap();
         let scheduler = Scheduler::new(parallelism, time_sender.clone(), poller.registry());
