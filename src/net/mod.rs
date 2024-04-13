@@ -1,6 +1,7 @@
 //! Networking primitives for TCP/UDP communication.
 mod tcp;
 
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::{io, thread};
 
@@ -23,12 +24,18 @@ enum Entry {
 pub(crate) struct Registry {
     entries: Mutex<Slab<Entry>>,
     registry: mio::Registry,
+    unused: Sender<Token>,
+    freeing: Receiver<Token>,
 }
+
+// Safety: mpsc::Receiver is only used in net::poller thread.
+unsafe impl Sync for Registry {}
 
 impl Registry {
     fn new(poll: &mio::Poll) -> io::Result<Arc<Registry>> {
         let registry = poll.registry().try_clone()?;
-        Ok(Arc::new(Registry { entries: Mutex::new(Slab::new()), registry }))
+        let (sender, receiver) = mpsc::channel();
+        Ok(Arc::new(Registry { entries: Mutex::new(Slab::new()), registry, unused: sender, freeing: receiver }))
     }
 
     fn register_entry(&self, entry: Entry) -> Token {
@@ -42,11 +49,21 @@ impl Registry {
         entries.remove(token.0);
     }
 
-    fn register_tcp_listener(&self, listener: &mut net::TcpListener) -> io::Result<parallel::Receiver<()>> {
+    fn deregister_event_source(&self, token: Token, mut source: impl mio::event::Source) {
+        self.registry.deregister(&mut source).ignore();
+        // No events for this token will issued afterward from future poll,
+        // but it is possible that net::poller is processing old events for this token.
+        //
+        // If we reclaim the token here, it is possible that it could be reused by new socket.
+        // Let's hand over it to poller thread to ease contention evaluation.
+        self.unused.send(token).ignore();
+    }
+
+    fn register_tcp_listener(&self, listener: &mut net::TcpListener) -> io::Result<(Token, parallel::Receiver<()>)> {
         let (readable_sender, readable_receiver) = parallel::bounded(2);
         let token = self.register_entry(Entry::Reader { readable: readable_sender });
         match self.registry.register(listener, token, Interest::READABLE) {
-            Ok(_) => Ok(readable_receiver),
+            Ok(_) => Ok((token, readable_receiver)),
             Err(err) => {
                 self.unregister_entry(token);
                 Err(err)
@@ -57,12 +74,12 @@ impl Registry {
     fn register_tcp_stream(
         &self,
         stream: &mut net::TcpStream,
-    ) -> io::Result<(parallel::Receiver<()>, parallel::Receiver<()>)> {
+    ) -> io::Result<(Token, parallel::Receiver<()>, parallel::Receiver<()>)> {
         let (readable_sender, readable_receiver) = parallel::bounded(2);
         let (writable_sender, writable_receiver) = parallel::bounded(2);
         let token = self.register_entry(Entry::Stream { readable: readable_sender, writable: writable_sender });
         match self.registry.register(stream, token, Interest::READABLE.add(Interest::WRITABLE)) {
-            Ok(_) => Ok((readable_receiver, writable_receiver)),
+            Ok(_) => Ok((token, readable_receiver, writable_receiver)),
             Err(err) => {
                 self.unregister_entry(token);
                 Err(err)
@@ -100,6 +117,9 @@ impl Registry {
                     },
                 }
             }
+        }
+        while let Ok(token) = self.freeing.try_recv() {
+            entries.remove(token.0);
         }
         stopped
     }
