@@ -1,12 +1,13 @@
 use std::io;
 use std::io::{Read, Write};
+use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::rc::Rc;
 use std::time::Duration;
 
 use ignore_result::Ignore;
-use mio::net;
+use mio::{net, Token};
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
 use crate::channel::parallel;
@@ -15,19 +16,28 @@ use crate::runtime::Scheduler;
 
 /// Listener for incoming TCP connections.
 pub struct TcpListener {
-    listener: net::TcpListener,
+    listener: ManuallyDrop<net::TcpListener>,
     readable: parallel::Receiver<()>,
+    token: Token,
 }
 
 assert_impl_all!(TcpListener: Send, Sync);
+
+impl Drop for TcpListener {
+    fn drop(&mut self) {
+        let registry = unsafe { Scheduler::registry() };
+        let listener = unsafe { ManuallyDrop::take(&mut self.listener) };
+        registry.deregister_event_source(self.token, listener);
+    }
+}
 
 impl TcpListener {
     /// Binds and listens to given socket address.
     pub fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
         let mut listener = net::TcpListener::bind(addr)?;
         let registry = unsafe { Scheduler::registry() };
-        let readable = registry.register_tcp_listener(&mut listener)?;
-        Ok(TcpListener { listener, readable })
+        let (token, readable) = registry.register_tcp_listener(&mut listener)?;
+        Ok(TcpListener { listener: ManuallyDrop::new(listener), readable, token })
     }
 
     /// Accepts an incoming connection.
@@ -66,19 +76,28 @@ impl TcpListener {
 
 /// A TCP stream between a local and a remote socket.
 pub struct TcpStream {
-    stream: net::TcpStream,
+    stream: ManuallyDrop<net::TcpStream>,
     readable: parallel::Receiver<()>,
     writable: parallel::Receiver<()>,
+    token: Token,
 }
 
 assert_impl_all!(TcpStream: Send, Sync);
 
+impl Drop for TcpStream {
+    fn drop(&mut self) {
+        let registry = unsafe { Scheduler::registry() };
+        let stream = unsafe { ManuallyDrop::take(&mut self.stream) };
+        registry.deregister_event_source(self.token, stream);
+    }
+}
+
 impl TcpStream {
     fn new(mut stream: net::TcpStream) -> io::Result<Self> {
         let registry = unsafe { Scheduler::registry() };
-        let (readable, mut writable) = registry.register_tcp_stream(&mut stream)?;
+        let (token, readable, mut writable) = registry.register_tcp_stream(&mut stream)?;
         writable.recv().expect("runtime closing");
-        Ok(TcpStream { stream, readable, writable })
+        Ok(TcpStream { stream: ManuallyDrop::new(stream), readable, writable, token })
     }
 
     /// Sets the time-to-live (aka. TTL or hop limit) option for ip packets sent from this socket.
@@ -93,14 +112,11 @@ impl TcpStream {
 
     /// Connects to remote host.
     pub fn connect(addr: SocketAddr) -> io::Result<Self> {
-        let mut stream = net::TcpStream::connect(addr)?;
-        let registry = unsafe { Scheduler::registry() };
-        let (readable, mut writable) = registry.register_tcp_stream(&mut stream)?;
-        writable.recv().expect("runtime closing");
-        if let Some(err) = stream.take_error()? {
+        let stream = Self::new(net::TcpStream::connect(addr)?)?;
+        if let Some(err) = stream.stream.take_error()? {
             return Err(err);
         }
-        Ok(TcpStream { stream, readable, writable })
+        Ok(stream)
     }
 
     /// Sets the value of the `TCP_NODELAY` option on this socket.
@@ -180,10 +196,19 @@ impl TcpStream {
     }
 
     /// Splits this connection to reader and writer.
-    pub fn into_split(self) -> (TcpReader, TcpWriter) {
-        let stream = Rc::new(self.stream);
-        let reader = TcpReader { stream: stream.clone(), readable: self.readable };
-        let writer = TcpWriter { stream, writable: self.writable };
+    pub fn into_split(mut self) -> (TcpReader, TcpWriter) {
+        let stream = Rc::new(unsafe { ManuallyDrop::take(&mut self.stream) });
+        let reader = TcpReader {
+            stream: ManuallyDrop::new(stream.clone()),
+            readable: unsafe { std::ptr::read(&self.readable) },
+            token: self.token,
+        };
+        let writer = TcpWriter {
+            stream: ManuallyDrop::new(stream),
+            writable: unsafe { std::ptr::read(&self.writable) },
+            token: self.token,
+        };
+        std::mem::forget(self);
         (reader, writer)
     }
 
@@ -232,15 +257,21 @@ impl AsRawFd for TcpStream {
 ///
 /// The read half of this connection will be shutdown when this value is dropped.
 pub struct TcpReader {
-    stream: Rc<net::TcpStream>,
+    stream: ManuallyDrop<Rc<net::TcpStream>>,
     readable: parallel::Receiver<()>,
+    token: Token,
 }
 
 assert_not_impl_any!(TcpReader: Send, Sync);
 
 impl Drop for TcpReader {
     fn drop(&mut self) {
-        self.stream.shutdown(std::net::Shutdown::Read).ignore();
+        let stream = unsafe { ManuallyDrop::take(&mut self.stream) };
+        stream.shutdown(std::net::Shutdown::Read).ignore();
+        if let Some(stream) = Rc::into_inner(stream) {
+            let registry = unsafe { Scheduler::registry() };
+            registry.deregister_event_source(self.token, stream);
+        }
     }
 }
 
@@ -255,15 +286,21 @@ impl io::Read for TcpReader {
 ///
 /// The write half of this connection will be shutdown when this value is dropped.
 pub struct TcpWriter {
-    stream: Rc<net::TcpStream>,
+    stream: ManuallyDrop<Rc<net::TcpStream>>,
     writable: parallel::Receiver<()>,
+    token: Token,
 }
 
 assert_not_impl_any!(TcpReader: Send, Sync);
 
 impl Drop for TcpWriter {
     fn drop(&mut self) {
-        self.stream.shutdown(std::net::Shutdown::Write).ignore();
+        let stream = unsafe { ManuallyDrop::take(&mut self.stream) };
+        stream.shutdown(std::net::Shutdown::Write).ignore();
+        if let Some(stream) = Rc::into_inner(stream) {
+            let registry = unsafe { Scheduler::registry() };
+            registry.deregister_event_source(self.token, stream);
+        }
     }
 }
 
