@@ -127,12 +127,14 @@ where
     let mut task = task::current();
     let (suspension, resumption) = suspension();
     let handle = JoinHandle::new(suspension);
-    let f = Box::new(move || {
-        let result = panic::catch_unwind(AssertUnwindSafe(f));
-        resumption.set_result(result);
-    });
     let task = unsafe { task.as_mut() };
-    task.spawn(f, StackSize::default());
+    task.spawn(
+        move || {
+            let result = panic::catch_unwind(AssertUnwindSafe(f));
+            resumption.set_result(result);
+        },
+        StackSize::default(),
+    );
     handle
 }
 

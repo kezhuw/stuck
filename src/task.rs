@@ -141,9 +141,6 @@ pub(crate) struct Task {
 
     yielding: bool,
 
-    // Newly spawned coroutines.
-    spawned_coroutines: Vec<ptr::NonNull<Coroutine>>,
-
     // We are running
     running_coroutines: VecDeque<ptr::NonNull<Coroutine>>,
 
@@ -158,12 +155,6 @@ pub(crate) struct Task {
 
     // Unblocking by events from outside this task
     unblocking_coroutines: Mutex<Vec<ptr::NonNull<Coroutine>>>,
-}
-
-impl Drop for Task {
-    fn drop(&mut self) {
-        self.spawned_coroutines.drain(..).for_each(Self::drop_coroutine);
-    }
 }
 
 unsafe impl Sync for Task {}
@@ -190,8 +181,7 @@ impl Task {
             running: Cell::new(true),
             aborting: false,
             yielding: false,
-            spawned_coroutines: vec![co],
-            running_coroutines: VecDeque::with_capacity(5),
+            running_coroutines: VecDeque::from([co]),
             yielding_coroutines: Vec::with_capacity(5),
             suspending_coroutines: HashMap::new(),
             blocking_coroutines: HashMap::new(),
@@ -267,7 +257,6 @@ impl Task {
                 self.run_coroutine(co);
             }
         }
-        self.spawned_coroutines.drain(..).for_each(Self::drop_coroutine);
     }
 
     // Grab this task to runq. Return false if waker win.
@@ -278,16 +267,11 @@ impl Task {
 
     pub fn sched(&mut self) -> SchedFlow {
         let _scope = Scope::enter(self);
-        self.running_coroutines.extend(self.spawned_coroutines.drain(..));
         self.running_coroutines.extend(self.yielding_coroutines.drain(..));
         self.unblock(false);
-        while !(self.yielding || (self.spawned_coroutines.is_empty() && self.running_coroutines.is_empty())) {
-            while let Some(co) = self.spawned_coroutines.pop() {
-                self.run_coroutine(co);
-            }
-            while let Some(co) = self.running_coroutines.pop_front() {
-                self.run_coroutine(co);
-            }
+        while !self.yielding && !self.running_coroutines.is_empty() {
+            let co = unsafe { self.running_coroutines.pop_front().unwrap_unchecked() };
+            self.run_coroutine(co);
         }
         self.yielding = false;
         if !self.yielding_coroutines.is_empty() {
@@ -351,10 +335,13 @@ impl Task {
         waking
     }
 
-    pub fn spawn(&mut self, f: FnMain, stack_size: StackSize) -> ptr::NonNull<Coroutine> {
+    pub fn spawn(&mut self, f: impl FnOnce() + 'static, stack_size: StackSize) {
+        if self.aborting {
+            return;
+        }
+        let f = Box::new(f);
         let co = ptr::NonNull::from(Box::leak(Coroutine::new(f, stack_size)));
-        self.spawned_coroutines.push(co);
-        co
+        self.running_coroutines.push_back(co);
     }
 }
 
