@@ -70,9 +70,15 @@ impl ThisThread {
     }
 }
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub(crate) enum Status {
+    Running,
+    Completed,
+}
+
 pub(crate) struct Coroutine {
+    status: Status,
     context: Box<Context>,
-    completed: bool,
     f: Option<Box<dyn FnOnce()>>,
 }
 
@@ -83,8 +89,8 @@ impl Coroutine {
         #[allow(invalid_value)]
         let mut co = Box::new(Coroutine {
             f: Option::Some(f),
+            status: Status::Running,
             context: unsafe { mem::MaybeUninit::zeroed().assume_init() },
-            completed: false,
         });
         let entry = Entry { f: Self::main, arg: (co.as_mut() as *mut Coroutine) as *mut libc::c_void, stack_size };
         mem::forget(mem::replace(&mut co.context, Context::new(&entry, None)));
@@ -94,7 +100,7 @@ impl Coroutine {
     extern "C" fn main(arg: *mut libc::c_void) {
         let co = unsafe { &mut *(arg as *mut Coroutine) };
         co.run();
-        co.completed = true;
+        co.status = Status::Completed;
         ThisThread::restore();
     }
 
@@ -106,10 +112,10 @@ impl Coroutine {
     /// Resumes coroutine.
     ///
     /// Returns whether this coroutine should be resumed again.
-    pub fn resume(&mut self) -> bool {
+    pub fn resume(&mut self) -> Status {
         let _scope = Scope::enter(self);
         ThisThread::resume(&self.context);
-        !self.completed
+        self.status
     }
 
     pub fn suspend(&mut self) {
