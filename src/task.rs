@@ -95,6 +95,10 @@ impl Builder<'_> {
         let handle = JoinHandle::new(session);
         let main: FnMain = Box::new(move || {
             let result = panic::catch_unwind(AssertUnwindSafe(f));
+            let task = unsafe { current().as_mut() };
+            let co = unsafe { coroutine::current().as_mut() };
+            task.status = Status::Completing;
+            co.suspend();
             waker.set_result(result);
         });
         let task = Task::new(main, self.stack_size);
@@ -129,15 +133,20 @@ pub(crate) trait Yielding {
     fn interrupt(&self, reason: &'static str) -> bool;
 }
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Status {
+    Running,
+    Completing,
+    Completed,
+}
+
 pub(crate) struct Task {
     id: u64,
 
     // main is special as task will terminate after main terminated
     main: ptr::NonNull<Coroutine>,
 
-    running: Cell<bool>,
-
-    aborting: bool,
+    status: Status,
 
     yielding: bool,
 
@@ -155,6 +164,9 @@ pub(crate) struct Task {
 
     // Unblocking by events from outside this task
     unblocking_coroutines: Mutex<Vec<ptr::NonNull<Coroutine>>>,
+
+    // Guarded by above mutex.
+    running: Cell<bool>,
 }
 
 unsafe impl Sync for Task {}
@@ -178,14 +190,14 @@ impl Task {
         Task {
             id,
             main: co,
-            running: Cell::new(true),
-            aborting: false,
+            status: Status::Running,
             yielding: false,
             running_coroutines: VecDeque::from([co]),
             yielding_coroutines: Vec::with_capacity(5),
             suspending_coroutines: HashMap::new(),
             blocking_coroutines: HashMap::new(),
             unblocking_coroutines: Mutex::new(Default::default()),
+            running: Cell::new(true),
         }
     }
 
@@ -197,14 +209,16 @@ impl Task {
         drop(unsafe { Box::from_raw(co.as_ptr()) });
     }
 
-    pub fn run_coroutine(&mut self, mut co: ptr::NonNull<Coroutine>) {
-        if unsafe { co.as_mut() }.resume() {
-            return;
+    fn run_coroutine(&mut self, mut co: ptr::NonNull<Coroutine>) -> coroutine::Status {
+        let status = unsafe { co.as_mut().resume() };
+        if status != coroutine::Status::Completed {
+            return status;
         }
-        if co == self.main && !self.aborting {
-            self.abort("task main terminated");
+        if co == self.main {
+            self.status = Status::Completed;
         }
         Self::drop_coroutine(co);
+        status
     }
 
     pub fn unblock(&mut self, block: bool) -> bool {
@@ -242,7 +256,6 @@ impl Task {
     }
 
     pub fn abort(&mut self, msg: &'static str) {
-        self.aborting = true;
         loop {
             self.interrupt(msg);
             if self.running_coroutines.is_empty() {
@@ -257,6 +270,9 @@ impl Task {
                 self.run_coroutine(co);
             }
         }
+        let status = self.run_coroutine(self.main);
+        assert_eq!(status, coroutine::Status::Completed);
+        assert_eq!(self.status, Status::Completed);
     }
 
     // Grab this task to runq. Return false if waker win.
@@ -269,9 +285,12 @@ impl Task {
         let _scope = Scope::enter(self);
         self.running_coroutines.extend(self.yielding_coroutines.drain(..));
         self.unblock(false);
-        while !self.yielding && !self.running_coroutines.is_empty() {
+        while !self.yielding && self.status == Status::Running && !self.running_coroutines.is_empty() {
             let co = unsafe { self.running_coroutines.pop_front().unwrap_unchecked() };
             self.run_coroutine(co);
+        }
+        if self.status == Status::Completing {
+            self.abort("task main terminated");
         }
         self.yielding = false;
         if !self.yielding_coroutines.is_empty() {
@@ -336,7 +355,7 @@ impl Task {
     }
 
     pub fn spawn(&mut self, f: impl FnOnce() + 'static, stack_size: StackSize) {
-        if self.aborting {
+        if self.status != Status::Running {
             return;
         }
         let f = Box::new(f);
@@ -409,13 +428,22 @@ mod tests {
     fn main_coroutine() {
         use std::cell::Cell;
         use std::rc::Rc;
+        use std::sync::atomic::{AtomicI32, Ordering};
         use std::time::Duration;
 
+        use scopeguard::defer;
+
+        let read = Arc::new(AtomicI32::new(0));
+        let write = read.clone();
         let t = task::spawn(|| {
             let cell = Rc::new(Cell::new(0));
             coroutine::spawn({
                 let cell = cell.clone();
                 move || {
+                    defer! {
+                        std::thread::sleep(Duration::from_secs(2));
+                        write.store(cell.get(), Ordering::Relaxed);
+                    }
                     time::sleep(Duration::from_secs(20));
                     cell.set(10);
                 }
@@ -431,5 +459,6 @@ mod tests {
             cell.get()
         });
         assert_eq!(t.join().unwrap(), 5);
+        assert_eq!(read.load(Ordering::Relaxed), 5);
     }
 }

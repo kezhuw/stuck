@@ -364,6 +364,14 @@ mod tests {
     }
 
     #[crate::test(crate = "crate")]
+    #[should_panic(expected = "deadlock suspending coroutines")]
+    fn suspension_deadlock() {
+        let (suspension, resumption) = coroutine::suspension::<()>();
+        suspension.suspend();
+        drop(resumption);
+    }
+
+    #[crate::test(crate = "crate")]
     fn join_handle_join() {
         let join_handle = coroutine::spawn(|| 5);
         assert_eq!(join_handle.join().unwrap(), 5);
