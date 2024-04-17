@@ -19,6 +19,10 @@ thread_local! {
     static THREAD_CONTEXT: UnsafeCell<Context> = UnsafeCell::new(Context::empty());
 }
 
+pub(crate) fn try_current() -> Option<ptr::NonNull<Coroutine>> {
+    COROUTINE.with(|p| p.get())
+}
+
 pub(crate) fn current() -> ptr::NonNull<Coroutine> {
     COROUTINE.with(|p| p.get()).expect("no running coroutine")
 }
@@ -73,11 +77,22 @@ impl ThisThread {
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub(crate) enum Status {
     Running,
+    Aborting,
+    Cancelling,
     Completed,
 }
 
+impl Status {
+    pub fn into_abort(self) -> Self {
+        match self {
+            Self::Running | Self::Aborting => Self::Aborting,
+            _ => self,
+        }
+    }
+}
+
 pub(crate) struct Coroutine {
-    status: Status,
+    pub status: Status,
     context: Box<Context>,
     f: Option<Box<dyn FnOnce()>>,
 }
@@ -120,6 +135,10 @@ impl Coroutine {
 
     pub fn suspend(&mut self) {
         ThisThread::suspend(&mut self.context);
+    }
+
+    pub fn is_cancelling(&self) -> bool {
+        self.status == Status::Cancelling
     }
 }
 
