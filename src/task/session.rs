@@ -13,7 +13,7 @@ use static_assertions::{assert_impl_all, assert_not_impl_any};
 use crate::coroutine::{self, Coroutine};
 use crate::error::PanicError;
 use crate::runtime::Scheduler;
-use crate::task::{self, Task, Yielding};
+use crate::task::{self, Interruption, Task, Yielding};
 
 #[derive(Copy, Clone)]
 struct SessionTask {
@@ -172,7 +172,8 @@ impl<T: Send + 'static> SessionJoint<T> {
         // We could be in joining due to task abortion. Nothing to reclaim for joining state.
     }
 
-    fn join_value(&self, joiner: SessionJoiner) -> SessionValue<T> {
+    fn join_value(&self, joiner: SessionJoiner, cancellation: Option<impl FnOnce()>) -> SessionValue<T> {
+        let interruptible = cancellation.is_none();
         let mut status = self.status();
         if status == SessionStatus::Empty {
             if let Err(bits) =
@@ -183,8 +184,23 @@ impl<T: Send + 'static> SessionJoint<T> {
                 let cell = unsafe { &mut *self.state.get() };
                 unsafe { ptr::write(&mut cell.joiner, ManuallyDrop::new(joiner)) };
                 self.status.store(SessionStatus::Joining.into_release(), Ordering::Release);
-                status = self.wait_value(joiner);
+                status = match cancellation {
+                    None => self.wait_value(joiner, Interruption::Interruptible::<fn()>(self)),
+                    Some(cancellation) => self.wait_value(joiner, Interruption::Cancellation(cancellation)),
+                }
             }
+        }
+        // In cancellation, there are two outstanding operations.
+        //
+        // * The cancellation request could be spuriously waked by response from interrupting
+        //   operation.
+        // * The interrupting request need to wake spuriously to check its completion.
+        while status == SessionStatus::Joining {
+            let interruption = match interruptible {
+                true => Interruption::Interruptible::<fn()>(self),
+                false => Interruption::Uninterruptible,
+            };
+            status = self.wait_value(joiner, interruption);
         }
         if status == SessionStatus::Value {
             loop {
@@ -321,16 +337,21 @@ impl<T: Send + 'static> SessionJoint<T> {
         }
     }
 
-    fn wait_value(&self, joiner: SessionJoiner) -> SessionStatus {
+    fn wait_value(&self, joiner: SessionJoiner, interruption: Interruption<'_, impl FnOnce()>) -> SessionStatus {
         match joiner {
-            SessionJoiner::Task { task } => self.wait_on_task(task.task, task.coroutine),
+            SessionJoiner::Task { task } => self.wait_on_task(task.task, task.coroutine, interruption),
             SessionJoiner::Thread { .. } => self.wait_on_thread(),
         }
     }
 
-    fn wait_on_task(&self, mut task: ptr::NonNull<Task>, co: ptr::NonNull<Coroutine>) -> SessionStatus {
+    fn wait_on_task(
+        &self,
+        mut task: ptr::NonNull<Task>,
+        co: ptr::NonNull<Coroutine>,
+        interruption: Interruption<'_, impl FnOnce()>,
+    ) -> SessionStatus {
         let task = unsafe { task.as_mut() };
-        task.block(co, self);
+        task.block(co, interruption);
         self.status()
     }
 
@@ -345,32 +366,20 @@ impl<T: Send + 'static> SessionJoint<T> {
         }
     }
 
-    fn join_on_task(&self, task: ptr::NonNull<Task>) -> Result<T, PanicError> {
-        let scheduler = unsafe { ptr::NonNull::from(Scheduler::current()) };
-        let coroutine = coroutine::current();
-        let joiner = SessionJoiner::Task { task: SessionTask { scheduler, task, coroutine } };
-        let value = self.join_value(joiner);
-        value.into()
-    }
-
-    fn join_on_thread(&self) -> Result<T, PanicError> {
-        let thread = thread::current();
-        let joiner =
-            SessionJoiner::Thread { thread: unsafe { mem::transmute::<&_, &'static thread::Thread>(&thread) } };
-        let value = self.join_value(joiner);
-        value.into()
-    }
-
-    pub(super) fn join(&self) -> Result<T, PanicError> {
-        if let Some(task) = task::task() {
-            self.join_on_task(task)
+    pub(super) fn join(&self, cancellation: Option<impl FnOnce()>) -> Result<T, PanicError> {
+        let joiner = if let Some(task) = task::task() {
+            let scheduler = unsafe { ptr::NonNull::from(Scheduler::current()) };
+            let coroutine = coroutine::current();
+            SessionJoiner::Task { task: SessionTask { scheduler, task, coroutine } }
         } else {
-            self.join_on_thread()
-        }
+            let thread = thread::current();
+            SessionJoiner::Thread { thread: unsafe { mem::transmute::<&_, &'static thread::Thread>(&thread) } }
+        };
+        self.join_value(joiner, cancellation).into()
     }
 
-    pub(super) fn wait(&self) -> T {
-        match self.join() {
+    pub(super) fn wait(&self, cancellation: Option<impl FnOnce()>) -> T {
+        match self.join(cancellation) {
             Ok(value) => value,
             Err(PanicError::Static(s)) => panic::panic_any(s),
             Err(PanicError::Unwind(err)) => panic::resume_unwind(err),
@@ -428,7 +437,8 @@ impl<T: Send + 'static> Session<T> {
     /// Waits peer to wake it.
     ///
     /// # Panics
-    /// Panic if no wakeup from [SessionWaker].
+    /// * Panic if all [SessionWaker]s dropped without a [SessionWaker::wake].
+    /// * Interruption in case of task termination.
     ///
     /// # Guarantee
     /// Only two situations can happen:
@@ -438,7 +448,18 @@ impl<T: Send + 'static> Session<T> {
     /// This means that no value linger after panic.
     pub fn wait(self) -> T {
         let joint = unsafe { self.into_joint() };
-        joint.wait()
+        joint.wait(None::<fn()>)
+    }
+
+    /// Same as above except that in case of interruption, a `cancellation` is performed to cancel
+    /// ongoing operation and wake it up. This is crucial for asynchronous operations that read to
+    /// or write from buffers on stack. Session should only be waked up after all references to
+    /// stack memory are relinquished. The cancellation is free to issue asynchronous operations
+    /// but not [coroutine::suspension] as it will be interrupted. If cancellation panics, the
+    /// session will wait until completion.
+    pub fn wait_uninterruptibly(self, cancellation: impl FnOnce()) -> T {
+        let joint = unsafe { self.into_joint() };
+        joint.wait(Some(cancellation))
     }
 }
 
@@ -495,10 +516,18 @@ impl<T: Send> SessionWaker<T> {
 }
 
 /// Constructs cooperative facilities to wait and wake coroutine across task boundary.
+///
+/// # Panics
+/// Panic if task is aborting.
 pub fn session<T>() -> (Session<T>, SessionWaker<T>)
 where
     T: Send,
 {
+    if let Some(co) = coroutine::try_current() {
+        if unsafe { co.as_ref().status } == coroutine::Status::Aborting {
+            panic!("task aborting")
+        }
+    }
     let joint = SessionJoint::new();
     let session = Session::new(joint.clone());
     let session_waker = SessionWaker::new(joint);
@@ -507,10 +536,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::task;
+    use test_case::test_case;
 
     #[crate::test(crate = "crate")]
     fn session_waker() {
+        use crate::task;
+
         let (session, waker) = task::session();
         drop(waker.clone());
         assert_eq!(session.joint.is_ready(), false);
@@ -532,8 +563,117 @@ mod tests {
 
     #[crate::test(crate = "crate")]
     fn session_dropped() {
+        use crate::task;
+
         let (session, waker) = task::session::<()>();
         drop(session);
         assert_eq!(waker.joint.is_ready(), true);
+    }
+
+    #[crate::test(crate = "crate")]
+    #[should_panic(expected = "task aborting")]
+    fn session_aborting() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use ignore_result::Ignore;
+
+        use crate::{coroutine, task, time};
+
+        let panic = Arc::new(Mutex::new(None));
+
+        task::spawn({
+            let panic = panic.clone();
+            move || {
+                coroutine::spawn(move || {
+                    std::panic::catch_unwind(|| {
+                        time::sleep(Duration::from_secs(30));
+                    })
+                    .ignore();
+                    if let Err(err) = std::panic::catch_unwind(|| time::sleep(Duration::from_millis(1))) {
+                        *panic.lock().unwrap() = Some(err);
+                    }
+                });
+
+                time::sleep(Duration::from_millis(30));
+            }
+        })
+        .join()
+        .unwrap();
+
+        if let Some(panic) = panic.lock().unwrap().take() {
+            std::panic::resume_unwind(panic);
+        };
+    }
+
+    #[test_case("noop"; "noop")]
+    #[test_case("panic"; "panic")]
+    #[test_case("suspend"; "suspend")]
+    #[test_case("async"; "session")]
+    #[test_case("sync"; "sync")]
+    #[crate::test(crate = "crate")]
+    fn session_cancellation(cancellation: &'static str) {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use crate::{coroutine, task, time};
+
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum Wakeup {
+            Timeouted,
+            Cancelled,
+        }
+
+        let panic = Arc::new(Mutex::new(None));
+        let wakeup = Arc::new(Mutex::new(None));
+        task::spawn({
+            let panic = panic.clone();
+            let wakeup = wakeup.clone();
+            move || {
+                coroutine::spawn(move || {
+                    if let Err(err) = std::panic::catch_unwind(|| {
+                        let (session, waker) = task::session();
+                        task::spawn({
+                            let waker = waker.clone();
+                            move || {
+                                time::sleep(Duration::from_secs(5));
+                                waker.wake(Wakeup::Timeouted);
+                            }
+                        });
+                        let r = session.wait_uninterruptibly(move || {
+                            match cancellation {
+                                "noop" => return,
+                                "panic" => panic!("faulty cancellation"),
+                                "suspend" => {
+                                    let (suspension, resumption) = coroutine::suspension();
+                                    suspension.suspend();
+                                    resumption.resume(());
+                                },
+                                "async" => time::sleep(Duration::from_millis(20)),
+                                "sync" | _ => {},
+                            }
+                            waker.wake(Wakeup::Cancelled);
+                        });
+                        *wakeup.lock().unwrap() = Some(r);
+                    }) {
+                        *panic.lock().unwrap() = Some(err);
+                    }
+                });
+
+                // Let spawning coroutine a chance to fall in suspension.
+                time::sleep(Duration::from_millis(30));
+            }
+        })
+        .join()
+        .unwrap();
+
+        if let Some(panic) = panic.lock().unwrap().take() {
+            std::panic::resume_unwind(panic);
+        }
+        let expected = match cancellation {
+            "noop" | "panic" | "suspend" => Wakeup::Timeouted,
+            "async" | "sync" | _ => Wakeup::Cancelled,
+        };
+        assert_eq!(*wakeup.lock().unwrap(), Some(expected));
     }
 }

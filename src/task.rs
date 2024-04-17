@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::{mem, ptr};
 
 use hashbrown::HashMap;
+use ignore_result::Ignore;
 use static_assertions::assert_impl_all;
 
 pub use self::session::{session, Session, SessionWaker};
@@ -124,13 +125,37 @@ impl<T: Send + 'static> JoinHandle<T> {
     /// Waits for associated task to finish and returns its result.
     pub fn join(self) -> Result<T, JoinError> {
         let joint = unsafe { self.session.into_joint() };
-        joint.join().map_err(JoinError::new)
+        joint.join(None::<fn()>).map_err(JoinError::new)
     }
 }
 
 // Yielding point.
 pub(crate) trait Yielding {
     fn interrupt(&self, reason: &'static str) -> bool;
+}
+
+static INTERRUPTIBLE: Interruptible = Interruptible {};
+static UNINTERRUPTIBLE: Uninterruptible = Uninterruptible {};
+
+struct Interruptible {}
+struct Uninterruptible {}
+
+impl Yielding for Interruptible {
+    fn interrupt(&self, _reason: &'static str) -> bool {
+        true
+    }
+}
+
+impl Yielding for Uninterruptible {
+    fn interrupt(&self, _reason: &'static str) -> bool {
+        false
+    }
+}
+
+pub(crate) enum Interruption<'a, T: FnOnce() = fn()> {
+    Cancellation(T),
+    Interruptible(&'a dyn Yielding),
+    Uninterruptible,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -245,12 +270,19 @@ impl Task {
         for co in self.yielding_coroutines.drain(..) {
             self.running_coroutines.push_back(co);
         }
-        for (co, yielding) in self.suspending_coroutines.drain() {
+        for (mut co, yielding) in self.suspending_coroutines.drain() {
             yielding.interrupt(msg);
             self.running_coroutines.push_back(co);
+            let co = unsafe { co.as_mut() };
+            co.status = co.status.into_abort();
         }
-        for (co, _) in self.blocking_coroutines.drain_filter(|_, yielding| yielding.interrupt(msg)) {
+        for (mut co, _) in self
+            .blocking_coroutines
+            .drain_filter(|co, yielding| unsafe { !co.as_ref().is_cancelling() && yielding.interrupt(msg) })
+        {
             self.running_coroutines.push_back(co);
+            let co = unsafe { co.as_mut() };
+            co.status = co.status.into_abort();
         }
         self.unblock(false);
     }
@@ -321,15 +353,38 @@ impl Task {
         co.suspend();
     }
 
-    fn block(&mut self, mut co: ptr::NonNull<Coroutine>, yielding: &dyn Yielding) {
+    fn block<F: FnOnce()>(&mut self, mut co: ptr::NonNull<Coroutine>, interruption: Interruption<'_, F>) {
         assert!(co == coroutine::current(), "Session.block: running coroutine changed");
-        let yielding = unsafe { std::mem::transmute::<&dyn Yielding, &'_ dyn Yielding>(yielding) };
-        self.blocking_coroutines.insert(co, yielding);
-        let co = unsafe { co.as_mut() };
-        co.suspend();
+        match interruption {
+            Interruption::Interruptible(yielding) => {
+                let yielding = unsafe { std::mem::transmute::<&dyn Yielding, &'_ dyn Yielding>(yielding) };
+                self.blocking_coroutines.insert(co, yielding);
+                let co = unsafe { co.as_mut() };
+                co.suspend();
+            },
+            Interruption::Uninterruptible => {
+                self.blocking_coroutines.insert(co, &UNINTERRUPTIBLE);
+                let co = unsafe { co.as_mut() };
+                co.suspend();
+            },
+            Interruption::Cancellation(cancellation) => {
+                self.blocking_coroutines.insert(co, &INTERRUPTIBLE);
+                let co = unsafe { co.as_mut() };
+                co.suspend();
+                if co.status == coroutine::Status::Aborting {
+                    co.status = coroutine::Status::Cancelling;
+                    std::panic::catch_unwind(AssertUnwindSafe(cancellation)).ignore();
+                    co.status = coroutine::Status::Aborting;
+                    // Cancellation completed, wakeup caller to check its completion.
+                }
+            },
+        }
     }
 
     pub fn yield_coroutine(&mut self, mut co: ptr::NonNull<Coroutine>) {
+        if self.status != Status::Running {
+            return;
+        }
         self.yielding_coroutines.push(co);
         let co = unsafe { co.as_mut() };
         co.suspend();
