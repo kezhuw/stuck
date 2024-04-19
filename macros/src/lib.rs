@@ -3,6 +3,7 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
+use syn::parse_quote;
 
 #[derive(Default)]
 struct Configuration {
@@ -91,7 +92,8 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
         return TokenStream::from(err.into_compile_error());
     }
 
-    let header = if is_test {
+    let test_attr: syn::Attribute = parse_quote! { #[::core::prelude::v1::test] };
+    let header = if is_test && !attrs.iter().any(|attr| *attr == test_attr) {
         quote! {
             #[::core::prelude::v1::test]
         }
@@ -103,8 +105,8 @@ fn generate(is_test: bool, attr: TokenStream, item: TokenStream) -> TokenStream 
     let parallelism = config.parallelism.unwrap_or(0);
     let parallelism_default: usize = if is_test { 2 } else { 0 };
     let result = quote! {
-        #header
         #(#attrs)*
+        #header
         #vis fn #name() #ret {
             fn entry(#inputs) #ret {
                 #body
