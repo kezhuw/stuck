@@ -15,7 +15,7 @@ use crate::task::{self, SessionWaker};
 
 enum Waiter<T: Send + 'static> {
     Task { waker: SessionWaker<Result<(), SendError<T>>>, value: T },
-    Thread { waker: Arc<ThreadWaker<SendError<T>>>, value: T },
+    Thread { waker: Arc<ThreadWaker<Result<(), SendError<T>>>>, value: T },
     Selector { selector: Selector },
 }
 
@@ -35,24 +35,25 @@ impl<T: Send + 'static> From<Selector> for Waiter<T> {
     }
 }
 
-enum RecvWaiter {
+enum RecvWaiter<T> {
     Selector { selector: Selector },
-    Receiver { session: SessionWaker<Permit> },
+    Task { session: SessionWaker<Permit> },
+    Thread { waker: Arc<ThreadWaker<Option<T>>> },
 }
 
-impl From<Selector> for RecvWaiter {
+impl<T> From<Selector> for RecvWaiter<T> {
     fn from(selector: Selector) -> Self {
         RecvWaiter::Selector { selector }
     }
 }
 
-impl From<SessionWaker<Permit>> for RecvWaiter {
+impl<T> From<SessionWaker<Permit>> for RecvWaiter<T> {
     fn from(session: SessionWaker<Permit>) -> Self {
-        RecvWaiter::Receiver { session }
+        RecvWaiter::Task { session }
     }
 }
 
-impl RecvWaiter {
+impl<T> RecvWaiter<T> {
     fn matches(&self, identifier: &Identifier) -> bool {
         if let RecvWaiter::Selector { selector } = self {
             selector.identify(identifier)
@@ -64,7 +65,7 @@ impl RecvWaiter {
 
 struct ThreadWaker<T> {
     condvar: Condvar,
-    result: UnsafeCell<Option<Result<(), T>>>,
+    result: UnsafeCell<Option<T>>,
 }
 
 impl<T> ThreadWaker<T> {
@@ -73,9 +74,9 @@ impl<T> ThreadWaker<T> {
     }
 
     // This should be called under mutex for result mutation.
-    unsafe fn wake(&self, r: Result<(), T>) {
+    unsafe fn wake(&self, value: T) {
         let result = &mut *self.result.get();
-        *result = Some(r);
+        *result = Some(value);
         self.condvar.notify_one();
     }
 }
@@ -89,7 +90,7 @@ struct State<T: Send + 'static> {
     bound: usize,
     deque: VecDeque<T>,
     senders: VecDeque<Waiter<T>>,
-    receivers: VecDeque<RecvWaiter>,
+    receivers: VecDeque<RecvWaiter<T>>,
 }
 
 impl<T: Send + 'static> State<T> {
@@ -173,7 +174,11 @@ impl<T: Send + 'static> State<T> {
         while let Some(waker) = self.receivers.pop_front() {
             let waked = match waker {
                 RecvWaiter::Selector { selector } => selector.apply(Permit::Consume.into()),
-                RecvWaiter::Receiver { session } => session.wake(Permit::Consume),
+                RecvWaiter::Task { session } => session.wake(Permit::Consume),
+                RecvWaiter::Thread { waker } => {
+                    unsafe { waker.wake(Some(self.deque.pop_front().unwrap())) };
+                    return;
+                },
             };
             if waked {
                 self.recv_permits += 1;
@@ -201,8 +206,13 @@ impl<T: Send + 'static> State<T> {
     fn close_receivers(&mut self) {
         while let Some(waker) = self.receivers.pop_front() {
             match waker {
-                RecvWaiter::Selector { selector } => selector.apply(Permit::Closed.into()),
-                RecvWaiter::Receiver { session } => session.wake(Permit::Closed),
+                RecvWaiter::Selector { selector } => {
+                    selector.apply(Permit::Closed.into());
+                },
+                RecvWaiter::Task { session } => {
+                    session.wake(Permit::Closed);
+                },
+                RecvWaiter::Thread { waker } => unsafe { waker.wake(None) },
             };
         }
     }
@@ -278,15 +288,29 @@ impl<T: Send + 'static> Channel<T> {
                 return Err(TryRecvError::Closed);
             } else if trying {
                 return Err(TryRecvError::Empty);
+            } else if task::task().is_some() {
+                let (session, waker) = task::session();
+                state.receivers.push_back(RecvWaiter::from(waker));
+                drop(state);
+                let permit = session.wait();
+                if permit == Permit::Closed {
+                    return Err(TryRecvError::Closed);
+                }
+                self.consume_recv_permit()
+            } else {
+                let waker = ThreadWaker::new();
+                state.receivers.push_back(RecvWaiter::Thread { waker: waker.clone() });
+                loop {
+                    state = waker.condvar.wait(state).unwrap();
+                    let result = unsafe { &mut *waker.result.get() };
+                    if let Some(result) = result.take() {
+                        return match result {
+                            None => Err(TryRecvError::Closed),
+                            Some(value) => Ok(value),
+                        };
+                    }
+                }
             }
-            let (session, waker) = task::session();
-            state.receivers.push_back(RecvWaiter::from(waker));
-            drop(state);
-            let permit = session.wait();
-            if permit == Permit::Closed {
-                return Err(TryRecvError::Closed);
-            }
-            self.consume_recv_permit()
         } else {
             let value = state.deque.pop_front();
             state.wake_sender();
@@ -654,6 +678,7 @@ mod tests {
 
     use ignore_result::Ignore;
     use more_asserts::{assert_ge, assert_le};
+    use test_case::test_case;
 
     use super::*;
     use crate::runtime::Builder;
@@ -740,6 +765,130 @@ mod tests {
         assert_eq!(6, receiver.recv().unwrap());
         assert_eq!(None, receiver.recv());
         sending.join().unwrap();
+    }
+
+    enum JoinHandle<T: Send + 'static> {
+        Task(task::JoinHandle<T>),
+        Thread(std::thread::JoinHandle<T>),
+    }
+
+    impl<T: Send + 'static> From<task::JoinHandle<T>> for JoinHandle<T> {
+        fn from(handle: task::JoinHandle<T>) -> Self {
+            Self::Task(handle)
+        }
+    }
+
+    impl<T: Send + 'static> From<std::thread::JoinHandle<T>> for JoinHandle<T> {
+        fn from(handle: std::thread::JoinHandle<T>) -> Self {
+            Self::Thread(handle)
+        }
+    }
+
+    impl<T: Send + 'static> JoinHandle<T> {
+        fn join(self) -> T {
+            match self {
+                Self::Task(task) => task.join().unwrap(),
+                Self::Thread(thread) => thread.join().unwrap(),
+            }
+        }
+    }
+
+    #[test_case("task"; "task_send")]
+    #[test_case("thread"; "thread_send")]
+    #[crate::test(crate = "crate")]
+    fn bounded_blocking_task_recv(source: &str) {
+        let (mut sender, mut receiver) = bounded::<i32>(5);
+        let sending: JoinHandle<_> = match source {
+            "task" => task::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(1).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(2).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(3).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(4).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(5).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(6).unwrap();
+            })
+            .into(),
+            "thread" | _ => std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(1).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(2).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(3).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(4).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(5).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(6).unwrap();
+            })
+            .into(),
+        };
+        assert_eq!(1, receiver.recv().unwrap());
+        assert_eq!(2, receiver.recv().unwrap());
+        assert_eq!(3, receiver.recv().unwrap());
+        assert_eq!(4, receiver.recv().unwrap());
+        assert_eq!(5, receiver.recv().unwrap());
+        assert_eq!(6, receiver.recv().unwrap());
+        assert_eq!(None, receiver.recv());
+        sending.join();
+    }
+
+    #[test_case("task"; "task_send")]
+    #[test_case("thread"; "thread_send")]
+    #[crate::test(crate = "crate")]
+    fn bounded_blocking_thread_recv(source: &str) {
+        let (mut sender, mut receiver) = bounded::<i32>(5);
+        let sending: JoinHandle<_> = match source {
+            "task" => task::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(1).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(2).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(3).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(4).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(5).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(6).unwrap();
+            })
+            .into(),
+            "thread" | _ => std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(1).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(2).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(3).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(4).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(5).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                sender.send(6).unwrap();
+            })
+            .into(),
+        };
+        std::thread::spawn(move || {
+            assert_eq!(1, receiver.recv().unwrap());
+            assert_eq!(2, receiver.recv().unwrap());
+            assert_eq!(3, receiver.recv().unwrap());
+            assert_eq!(4, receiver.recv().unwrap());
+            assert_eq!(5, receiver.recv().unwrap());
+            assert_eq!(6, receiver.recv().unwrap());
+            assert_eq!(None, receiver.recv());
+        })
+        .join()
+        .unwrap();
+        sending.join();
     }
 
     #[test]
