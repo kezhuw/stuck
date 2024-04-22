@@ -149,9 +149,10 @@ impl<T: Send + 'static> State<T> {
         while let Some(sender) = self.senders.pop_front() {
             match sender {
                 Waiter::Task { waker, value } => {
-                    self.deque.push_back(value);
-                    waker.wake(Ok(()));
-                    return;
+                    if waker.wake(Ok(())) {
+                        self.deque.push_back(value);
+                        return;
+                    }
                 },
                 Waiter::Thread { waker, value } => {
                     self.deque.push_back(value);
@@ -767,6 +768,25 @@ mod tests {
         assert_eq!(6, receiver.recv().unwrap());
         assert_eq!(None, receiver.recv());
         sending.join().unwrap();
+    }
+
+    #[crate::test(crate = "crate")]
+    fn bounded_send_aborted() {
+        use crate::{coroutine, time};
+
+        let (mut sender, mut receiver) = bounded::<i32>(2);
+        let _sender = sender.clone();
+        task::spawn(move || {
+            sender.send(1).unwrap();
+            sender.send(2).unwrap();
+            coroutine::spawn(move || sender.send(3).unwrap());
+            time::sleep(Duration::from_millis(20));
+        })
+        .join()
+        .unwrap();
+        assert_eq!(receiver.recv(), Some(1));
+        assert_eq!(receiver.recv(), Some(2));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
     }
 
     #[crate::test(crate = "crate")]
