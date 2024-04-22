@@ -94,12 +94,16 @@ struct State<T: Send + 'static> {
 
 impl<T: Send + 'static> State<T> {
     fn is_full(&self) -> bool {
-        self.deque.len() + self.send_permits == self.bound
+        self.recvable_len() == self.bound
+    }
+
+    fn recvable_len(&self) -> usize {
+        self.deque.len() + self.send_permits
     }
 
     fn is_empty(&self) -> bool {
         // `>` could happen when:
-        // * channeld closed due to all senders dropped.
+        // * channel closed due to all senders dropped.
         // * pending recv permits
         // * new recv permit reservation
         //
@@ -138,7 +142,7 @@ impl<T: Send + 'static> State<T> {
     }
 
     fn is_recvable(&self) -> bool {
-        self.send_permits != 0 || !self.deque.is_empty()
+        self.recvable_len() != 0
     }
 
     fn wake_sender(&mut self) {
@@ -283,8 +287,10 @@ impl<T: Send + 'static> Channel<T> {
             }
             self.consume_recv_permit()
         } else {
+            let value = state.deque.pop_front();
             state.wake_sender();
-            state.deque.pop_front()
+            debug_assert!(state.recvable_len() <= state.bound);
+            value
         };
         match value {
             None => Err(TryRecvError::Closed),
