@@ -1,12 +1,14 @@
 //! Networking primitives for TCP/UDP communication.
 mod tcp;
 
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::{io, thread};
 
 use ignore_result::Ignore;
 use mio::event::{Event, Events};
+use mio::unix::SourceFd;
 use mio::{net, Interest, Token, Waker};
 use slab::Slab;
 
@@ -59,16 +61,20 @@ impl Registry {
         self.unused.send(token).ignore();
     }
 
-    fn register_tcp_listener(&self, listener: &mut net::TcpListener) -> io::Result<(Token, parallel::Receiver<()>)> {
+    pub fn register_reader(&self, fd: &RawFd) -> io::Result<(Token, parallel::Receiver<()>)> {
         let (readable_sender, readable_receiver) = parallel::bounded(2);
         let token = self.register_entry(Entry::Reader { readable: readable_sender });
-        match self.registry.register(listener, token, Interest::READABLE) {
+        match self.registry.register(&mut SourceFd(fd), token, Interest::READABLE) {
             Ok(_) => Ok((token, readable_receiver)),
             Err(err) => {
                 self.unregister_entry(token);
                 Err(err)
             },
         }
+    }
+
+    fn register_tcp_listener(&self, listener: &mut net::TcpListener) -> io::Result<(Token, parallel::Receiver<()>)> {
+        self.register_reader(&listener.as_raw_fd())
     }
 
     fn register_tcp_stream(

@@ -455,10 +455,18 @@ impl<T: Send + 'static> Session<T> {
     /// or write from buffers on stack. Session should only be waked up after all references to
     /// stack memory are relinquished. The cancellation is free to issue asynchronous operations
     /// but not [coroutine::suspension] as it will be interrupted. If cancellation panics, the
-    /// session will wait until completion.
-    pub fn wait_uninterruptibly(self, cancellation: impl FnOnce()) -> T {
+    /// session will wait until completion. The argument provided to cancellation is unique among
+    /// ongoing sessions.
+    pub fn wait_uninterruptibly(self, cancellation: impl FnOnce(usize)) -> T {
+        let user_data = self.user_data();
         let joint = unsafe { self.into_joint() };
-        joint.wait(Some(cancellation))
+        joint.wait(Some(move || cancellation(user_data)))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn user_data(&self) -> usize {
+        let pointer = unsafe { Arc::into_raw(ptr::read(&self.joint)) };
+        pointer as usize
     }
 }
 
@@ -511,6 +519,12 @@ impl<T: Send> SessionWaker<T> {
             Ok(value) => joint.wake(value).ignore(),
             Err(err) => joint.fault(PanicError::Unwind(err)),
         };
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn user_data(&self) -> usize {
+        let pointer = unsafe { Arc::into_raw(ptr::read(&self.joint)) };
+        pointer as usize
     }
 }
 
@@ -639,7 +653,7 @@ mod tests {
                                 waker.wake(Wakeup::Timeouted);
                             }
                         });
-                        let r = session.wait_uninterruptibly(move || {
+                        let r = session.wait_uninterruptibly(move |_| {
                             match cancellation {
                                 "noop" => return,
                                 "panic" => panic!("faulty cancellation"),

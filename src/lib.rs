@@ -61,6 +61,8 @@
 pub mod channel;
 pub mod coroutine;
 mod error;
+pub mod fs;
+pub mod io;
 pub mod net;
 pub mod runtime;
 pub mod select;
