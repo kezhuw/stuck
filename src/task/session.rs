@@ -381,8 +381,7 @@ impl<T: Send + 'static> SessionJoint<T> {
     pub(super) fn wait(&self, cancellation: Option<impl FnOnce()>) -> T {
         match self.join(cancellation) {
             Ok(value) => value,
-            Err(PanicError::Static(s)) => panic::panic_any(s),
-            Err(PanicError::Unwind(err)) => panic::resume_unwind(err),
+            Err(panic) => panic.resume(),
         }
     }
 }

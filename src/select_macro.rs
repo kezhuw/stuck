@@ -507,7 +507,7 @@ macro_rules! select_internal {
         let mut _enabled = true;
         $( _enabled = $pred; ) ?
         if _enabled {
-            let ref _ref = $r;
+            let _ref = &$r;
             let _ref = unsafe { ::std::mem::transmute::<&dyn $crate::select::Selectable, &'_ dyn $crate::select::Selectable>(_ref) };
             $selector[$index] = Some(_ref);
         }

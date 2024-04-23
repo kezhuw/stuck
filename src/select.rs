@@ -1,5 +1,8 @@
 //! Selectively read and write values to/from multiple selectables simultaneously.
 
+mod thread;
+
+use self::thread::{Parker, Unparker};
 use crate::coroutine::{self, Resumption, Suspension};
 use crate::task::{self, Session, SessionWaker};
 
@@ -43,14 +46,20 @@ impl Default for Permit {
 #[derive(Clone)]
 enum Waker {
     Task(SessionWaker<(usize, Permit)>),
+    Thread(Unparker<(usize, Permit)>),
     Coroutine(Resumption<(usize, Permit)>),
 }
 
 impl Waker {
     fn new(parallel: bool) -> (Waiter, Waker) {
         if parallel {
-            let (session, waker) = task::session();
-            (Waiter::Task(session), Waker::Task(waker))
+            if task::task().is_some() {
+                let (session, waker) = task::session();
+                (Waiter::Task(session), Waker::Task(waker))
+            } else {
+                let (parker, unparker) = thread::parker();
+                (Waiter::Thread(parker), Waker::Thread(unparker))
+            }
         } else {
             let (suspension, resumption) = coroutine::suspension();
             (Waiter::Coroutine(suspension), Waker::Coroutine(resumption))
@@ -60,6 +69,7 @@ impl Waker {
     fn wake(self, index: usize, permit: Permit) -> bool {
         match self {
             Waker::Task(session) => session.wake((index, permit)),
+            Waker::Thread(unparker) => unparker.unpark((index, permit)),
             Waker::Coroutine(suspension) => suspension.resume((index, permit)),
         }
     }
@@ -67,6 +77,7 @@ impl Waker {
 
 enum Waiter {
     Task(Session<(usize, Permit)>),
+    Thread(Parker<(usize, Permit)>),
     Coroutine(Suspension<(usize, Permit)>),
 }
 
@@ -74,6 +85,7 @@ impl Waiter {
     fn wait(self) -> (usize, Permit) {
         match self {
             Waiter::Task(session) => session.wait(),
+            Waiter::Thread(parker) => parker.park(),
             Waiter::Coroutine(suspension) => suspension.suspend(),
         }
     }
@@ -81,6 +93,7 @@ impl Waiter {
     fn is_ready(&self) -> bool {
         match self {
             Waiter::Task(session) => session.is_ready(),
+            Waiter::Thread(parker) => parker.is_ready(),
             Waiter::Coroutine(suspension) => suspension.is_ready(),
         }
     }
@@ -711,5 +724,45 @@ mod tests {
 
         assert_eq!(result1 & result2, false);
         assert_eq!(result1 | result2, true);
+    }
+
+    #[test]
+    fn select_thread() {
+        let (mut ping_sender, mut ping_receiver) = parallel::bounded(1);
+        let (mut pong_sender, mut pong_receiver) = parallel::bounded(1);
+        select! {
+            _ = <- pong_receiver => panic!("no value"),
+            default => {},
+        }
+        let pong = std::thread::spawn(move || {
+            let mut sum = 0;
+            loop {
+                select! {
+                    v = <-ping_receiver => if let Some(v) = v {
+                        sum += v;
+                        pong_sender.send(v).ignore();
+                    },
+                    complete => break,
+                }
+            }
+            sum
+        });
+        for i in 1..=5 {
+            select! {
+                r = ping_sender<-i => r.unwrap(),
+            }
+            select! {
+                v = <-pong_receiver => {
+                    assert_eq!(v, Some(i));
+                }
+            }
+        }
+        ping_sender.close();
+        select! {
+            _ = ping_sender<-5 => panic!("sender closed"),
+            default => panic!("compelte"),
+            complete => {},
+        }
+        assert_eq!(pong.join().unwrap(), 15);
     }
 }

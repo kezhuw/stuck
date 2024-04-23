@@ -1,5 +1,5 @@
 use std::any::{Any, TypeId};
-use std::fmt;
+use std::{fmt, panic};
 
 use static_assertions::assert_impl_all;
 
@@ -9,6 +9,13 @@ pub(crate) enum PanicError {
 }
 
 impl PanicError {
+    pub fn resume(self) -> ! {
+        match self {
+            PanicError::Static(s) => panic::panic_any(s),
+            PanicError::Unwind(err) => panic::resume_unwind(err),
+        }
+    }
+
     fn into_boxed(self) -> Box<dyn Any + Send + 'static> {
         match self {
             PanicError::Unwind(boxed) => boxed,

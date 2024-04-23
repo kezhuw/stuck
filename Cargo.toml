@@ -27,6 +27,7 @@ hashbrown = "0.12.0"
 more-asserts = "0.2.2"
 
 [dev-dependencies]
+googletest = "0.11.0"
 pretty_assertions = "1.2.0"
 scopeguard = "1.2.0"
 test-case = "3.3.1"
