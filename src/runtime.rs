@@ -11,7 +11,7 @@ use ignore_result::Ignore;
 use crate::channel::parallel::{self, Sender};
 use crate::channel::prelude::*;
 use crate::task::{self, SchedFlow, Task};
-use crate::{net, time};
+use crate::{io, net, time};
 
 thread_local! {
     static SCHEDULER: Cell<Option<ptr::NonNull<Scheduler>>> = const {  Cell::new(None) };
@@ -70,8 +70,10 @@ impl Builder {
             self.parallelism.unwrap_or_else(|| thread::available_parallelism().map_or(4, NonZeroUsize::get));
         let (time_sender, time_receiver) = parallel::unbounded(512);
         let poller = net::Poller::new().unwrap();
-        let scheduler = Scheduler::new(parallelism, time_sender.clone(), poller.registry());
-        let stopper = poller.start().unwrap();
+        let (io_poller, io_requester) = io::Poller::new();
+        let scheduler = Scheduler::new(parallelism, time_sender.clone(), poller.registry(), io_requester);
+        let net_stopper = poller.start().unwrap();
+        let io_stopper = io_poller.start(&scheduler.registry).unwrap();
         let timer = task::Builder::with_scheduler(&scheduler).spawn(move || {
             time::timer(time_receiver);
         });
@@ -86,7 +88,8 @@ impl Builder {
             scheduler,
             timer: MaybeUninit::new(timer),
             ticker: MaybeUninit::new(ticker),
-            stopper: MaybeUninit::new(stopper),
+            io_stopper,
+            net_stopper: MaybeUninit::new(net_stopper),
             scheduling_threads,
         }
     }
@@ -99,7 +102,8 @@ pub struct Runtime {
     scheduler: Arc<Scheduler>,
     timer: MaybeUninit<task::JoinHandle<()>>,
     ticker: MaybeUninit<thread::JoinHandle<()>>,
-    stopper: MaybeUninit<net::Stopper>,
+    io_stopper: io::Stopper,
+    net_stopper: MaybeUninit<net::Stopper>,
     scheduling_threads: Vec<thread::JoinHandle<()>>,
 }
 
@@ -138,11 +142,13 @@ impl Drop for Runtime {
         self.scheduler.stop();
         let timer = unsafe { ptr::read(self.timer.as_ptr()) };
         let ticker = unsafe { ptr::read(self.ticker.as_ptr()) };
-        let mut stopper = unsafe { ptr::read(self.stopper.as_ptr()) };
+        let mut net_stopper = unsafe { ptr::read(self.net_stopper.as_ptr()) };
         timer.join().ignore();
         ticker.join().ignore();
-        stopper.stop();
         self.scheduler.stop();
+        // uring completion is notified through eventfd which monitoried through net::Poller.
+        self.io_stopper.stop();
+        net_stopper.stop();
         for handle in self.scheduling_threads.drain(..) {
             handle.join().ignore();
         }
@@ -171,19 +177,26 @@ pub(crate) struct Scheduler {
     state: Mutex<SchedulerState>,
     waker: Condvar,
     registry: Arc<net::Registry>,
+    requester: io::Requester,
 }
 
 unsafe impl Send for Scheduler {}
 unsafe impl Sync for Scheduler {}
 
 impl Scheduler {
-    fn new(parallelism: usize, timer: Sender<time::Message>, registry: Arc<net::Registry>) -> Arc<Scheduler> {
+    fn new(
+        parallelism: usize,
+        timer: Sender<time::Message>,
+        registry: Arc<net::Registry>,
+        requester: io::Requester,
+    ) -> Arc<Scheduler> {
         Arc::new(Scheduler {
             parallelism,
             timer,
             state: Mutex::new(SchedulerState::new()),
             waker: Condvar::new(),
             registry,
+            requester,
         })
     }
 
@@ -263,6 +276,7 @@ impl Scheduler {
 
     fn serve(&self) {
         let _scope = Scope::enter(self);
+        let _io_scope = io::Scope::enter(self.requester.clone());
         let mut state = self.state.lock().unwrap();
         while state.stopped < 0 {
             state = self.run(state)
