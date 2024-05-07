@@ -2,12 +2,15 @@ use std::{mem, ptr};
 
 use super::stack::{Stack, StackSize};
 
+#[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
+compile_error!("only 32-bit and 64-bit systems are supported");
+
 #[allow(improper_ctypes)] // suppress "`extern` block uses type `u128`, which is not FFI-safe"
 extern "C" {
     fn getcontext(ucp: *mut libc::ucontext_t) -> libc::c_int;
     fn setcontext(ucp: *const libc::ucontext_t) -> libc::c_int;
     fn swapcontext(oucp: *mut libc::ucontext_t, ucp: *const libc::ucontext_t) -> libc::c_int;
-    fn makecontext(ucp: *mut libc::ucontext_t, func: extern "C" fn(*mut libc::c_void), argc: libc::c_int, ...);
+    fn makecontext(ucp: *mut libc::ucontext_t, func: extern "C" fn(u32, u32), argc: libc::c_int, ...);
 }
 
 #[repr(C, align(16))]
@@ -26,8 +29,9 @@ pub struct Context {
 
 #[derive(Debug)]
 pub struct Entry {
-    pub f: extern "C" fn(*mut libc::c_void),
-    pub arg: *mut libc::c_void,
+    pub f: extern "C" fn(u32, u32),
+    pub arg1: u32,
+    pub arg2: u32,
     pub stack_size: StackSize,
 }
 
@@ -54,7 +58,9 @@ impl Context {
             Option::Some(context) => &mut context.context,
         };
         ctx.stack = stack;
-        unsafe { makecontext(&mut ctx.context, entry.f, 1, entry.arg) };
+        unsafe {
+            makecontext(&mut ctx.context, entry.f, 2, entry.arg1, entry.arg2);
+        }
         ctx
     }
 
