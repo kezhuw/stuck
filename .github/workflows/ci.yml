@@ -21,8 +21,12 @@ jobs:
           components: rustfmt
     - name: Check formatting
       run: cargo fmt --all -- --check
+
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v2
     - uses: Swatinem/rust-cache@v1
@@ -33,9 +37,13 @@ jobs:
           override: true
     - name: Build code
       run: cargo build --workspace --examples
+
   test:
     needs: [build]
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-13]
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v2
     - uses: Swatinem/rust-cache@v1
@@ -45,7 +53,7 @@ jobs:
           toolchain: stable
           override: true
     - name: Test code
-      run: cargo test
+      run: cargo test -- --nocapture
 
   coverage:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master')
@@ -78,7 +86,10 @@ jobs:
 
   lint:
     needs: [build]
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v2
     - uses: Swatinem/rust-cache@v1
@@ -90,6 +101,7 @@ jobs:
           components: clippy
     - name: Lint code
       run: cargo clippy --no-deps -- -D clippy::all
+
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [build, test, lint]
