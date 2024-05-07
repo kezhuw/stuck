@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2024-05-07
+### Added
+- feat: support uninterruptible session for asynchronous operations ([#52](https://github.com/kezhuw/stuck/pull/52))
+- feat: support blocking std::thread receiver for parallel channel ([563353a](https://github.com/kezhuw/stuck/commit/563353ab3ba53677ded2e606584c88be326e681a))
+- feat: support select! on std::thread ([0d0cfd5](https://github.com/kezhuw/stuck/commit/0d0cfd5a58cf7c96843af9d45be1b9db0a2fd367))
+- Name stuck runtime threads ([#39](https://github.com/kezhuw/stuck/pull/39))
+- feat: complete task only after all auxiliary coroutines completed ([#48](https://github.com/kezhuw/stuck/pull/48))
+- ci: add build/test/lint matrix for ubuntu and macos ([#56](https://github.com/kezhuw/stuck/pull/56))
+
+### Changed
+- Defaults parallelism to STUCK_PARALLELISM_DEFAULT env var ([#36](https://github.com/kezhuw/stuck/pull/36))
+- Defaults stack size to STUCK_STACK_SIZE env var ([#38](https://github.com/kezhuw/stuck/pull/38))
+- Use `mmap` to allocate stack to avoid page fault in allocation ([#40](https://github.com/kezhuw/stuck/pull/40))
+
+### Fixed
+- Fix mio slab token leak after socket dropped ([#43](https://github.com/kezhuw/stuck/pull/43))
+- test: fix duplicated test runs from `test_case` and `stuck::test` ([#53](https://github.com/kezhuw/stuck/pull/53))
+- fix: parallel channel bound violated temporarily ([2ddef1d](https://github.com/kezhuw/stuck/commit/2ddef1da60255d495804fb39c3a413d94a130340))
+- fix: parallel channel send succeed after aborted ([bfdaac4](https://github.com/kezhuw/stuck/commit/bfdaac46d7c25c0ebff92d99a670fdb0918e0d1b))
+- fix: crash on macOS arm cpus, e.g. M1 ([#57](https://github.com/kezhuw/stuck/pull/57))
+
 ## [0.3.2] - 2024-04-02
 ### Changed
 - Fix crash in macOS due to missing mcontext inside ucontext
@@ -79,6 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial release.
 
+[0.4.0]: https://github.com/kezhuw/stuck/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/kezhuw/stuck/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/kezhuw/stuck/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kezhuw/stuck/compare/v0.2.0...v0.3.0
