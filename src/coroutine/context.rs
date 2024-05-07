@@ -2,6 +2,7 @@ use std::{mem, ptr};
 
 use super::stack::{Stack, StackSize};
 
+#[allow(improper_ctypes)] // suppress "`extern` block uses type `u128`, which is not FFI-safe"
 extern "C" {
     fn getcontext(ucp: *mut libc::ucontext_t) -> libc::c_int;
     fn setcontext(ucp: *const libc::ucontext_t) -> libc::c_int;
@@ -9,7 +10,7 @@ extern "C" {
     fn makecontext(ucp: *mut libc::ucontext_t, func: extern "C" fn(*mut libc::c_void), argc: libc::c_int, ...);
 }
 
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct Context {
     stack: Stack,
     context: libc::ucontext_t,
