@@ -107,13 +107,22 @@ impl Coroutine {
             status: Status::Running,
             context: unsafe { mem::MaybeUninit::zeroed().assume_init() },
         });
-        let entry = Entry { f: Self::main, arg: (co.as_mut() as *mut Coroutine) as *mut libc::c_void, stack_size };
+        let ptr = co.as_mut() as *mut Coroutine as usize;
+        #[cfg(target_pointer_width = "64")]
+        let (low, high) = (ptr as u32, (ptr >> 32) as u32);
+        #[cfg(target_pointer_width = "32")]
+        let (low, high) = (ptr as u32, 0);
+        let entry = Entry { f: Self::main, arg1: low, arg2: high, stack_size };
         mem::forget(mem::replace(&mut co.context, Context::new(&entry, None)));
         co
     }
 
-    extern "C" fn main(arg: *mut libc::c_void) {
-        let co = unsafe { &mut *(arg as *mut Coroutine) };
+    extern "C" fn main(low: u32, _high: u32) {
+        #[cfg(target_pointer_width = "64")]
+        let ptr = ((_high as usize) << 32) | low as usize;
+        #[cfg(target_pointer_width = "32")]
+        let ptr = low as usize;
+        let co = unsafe { &mut *(ptr as *const Coroutine as *mut Coroutine) };
         co.run();
         co.status = Status::Completed;
         ThisThread::restore();

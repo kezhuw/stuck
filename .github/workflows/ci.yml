@@ -42,7 +42,13 @@ jobs:
     needs: [build]
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-13]
+        os: [
+          ubuntu-latest,
+          # intel
+          macos-13,
+          # arm
+          macos-latest
+        ]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v2
