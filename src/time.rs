@@ -1,3 +1,5 @@
+//! Utilities to suspend running coroutines.
+
 use std::mem::MaybeUninit;
 use std::ptr;
 use std::time::{Duration, Instant};

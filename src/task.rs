@@ -1,3 +1,5 @@
+//! Lightweight concurrent execution units based on coroutines.
+
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};

@@ -1,3 +1,5 @@
+//! Constructions to bootstrap stuck runtime.
+
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::mem::MaybeUninit;

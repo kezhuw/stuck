@@ -1,3 +1,5 @@
+//! Drop-in replacement of [std::fs] with no operations block scheduling thread.
+
 use std::io::{Read, Result, Seek, SeekFrom, Write};
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -9,6 +11,7 @@ use ignore_result::Ignore;
 use crate::io::{poller, Operation, Request};
 use crate::task;
 
+/// Same as [std::fs::File] except that it does not block scheduling thread in blocking operations.
 #[derive(Debug)]
 pub struct File {
     fd: OwnedFd,
@@ -48,30 +51,37 @@ impl Write for File {
 }
 
 impl File {
+    /// Same as [std::fs::File::open] except that it does not block scheduling thread.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<File> {
         OpenOptions::new().read(true).open(path.as_ref())
     }
 
+    /// Same as [std::fs::File::create] except that it does not block scheduling thread.
     pub fn create<P: AsRef<Path>>(path: P) -> Result<File> {
         OpenOptions::new().write(true).create(true).truncate(true).open(path.as_ref())
     }
 
+    /// Same as [std::fs::File::create_new] except that it does not block scheduling thread.
     pub fn create_new<P: AsRef<Path>>(path: P) -> Result<File> {
         OpenOptions::new().write(true).create_new(true).open(path.as_ref())
     }
 
+    /// Same as [std::fs::File::options].
     pub fn options() -> OpenOptions {
         OpenOptions::new()
     }
 
+    /// Same as [std::fs::File::sync_all] except that it does not block scheduling thread.
     pub fn sync_all(&self) -> Result<()> {
         self.sync(false)
     }
 
+    /// Same as [std::fs::File::sync_data] except that it does not block scheduling thread.
     pub fn sync_data(&self) -> Result<()> {
         self.sync(true)
     }
 
+    /// Same as [std::fs::File::set_len] except that it does not block scheduling thread.
     pub fn set_len(&self, size: u64) -> Result<()> {
         let operation = Operation::Truncate { fd: self.fd.as_raw_fd(), size };
         let requester = poller::requester();
@@ -81,6 +91,7 @@ impl File {
         result.map(|_| {})
     }
 
+    /// Same as [std::fs::File::metadata] except that it does not block scheduling thread.
     pub fn metadata(&self) -> Result<Metadata> {
         let path = [0u8; 1];
         let mut metadata = unsafe { std::mem::zeroed() };
@@ -100,6 +111,8 @@ impl File {
     }
 }
 
+/// Same as [std::fs::OpenOptions] except that [OpenOptions::open] does not block scheduling
+/// thread.
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
     read: bool,
@@ -112,6 +125,7 @@ pub struct OpenOptions {
 }
 
 impl OpenOptions {
+    /// Same as [std::fs::OpenOptions::new].
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -125,31 +139,37 @@ impl OpenOptions {
         }
     }
 
+    /// Same as [std::fs::OpenOptions::read].
     pub fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
         self
     }
 
+    /// Same as [std::fs::OpenOptions::write].
     pub fn write(&mut self, write: bool) -> &mut Self {
         self.write = write;
         self
     }
 
+    /// Same as [std::fs::OpenOptions::append].
     pub fn append(&mut self, append: bool) -> &mut Self {
         self.append = append;
         self
     }
 
+    /// Same as [std::fs::OpenOptions::truncate].
     pub fn truncate(&mut self, truncate: bool) -> &mut Self {
         self.truncate = truncate;
         self
     }
 
+    /// Same as [std::fs::OpenOptions::create].
     pub fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
         self
     }
 
+    /// Same as [std::fs::OpenOptions::create_new].
     pub fn create_new(&mut self, create_new: bool) -> &mut Self {
         self.create_new = create_new;
         self
@@ -176,6 +196,7 @@ impl OpenOptions {
         flags
     }
 
+    /// Same as [std::fs::OpenOptions::open] except that it does not block scheduling thread.
     pub fn open<P: AsRef<Path>>(&self, path: P) -> Result<File> {
         let path = path.as_ref();
         let bytes = path.as_os_str().as_encoded_bytes();
@@ -190,23 +211,28 @@ impl OpenOptions {
     }
 }
 
+/// Same as [std::fs::FileType].
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FileType(libc::mode_t);
 
 impl FileType {
+    /// Same as [std::fs::FileType::is_dir].
     pub fn is_dir(&self) -> bool {
         (self.0 & libc::S_IFMT) == libc::S_IFDIR
     }
 
+    /// Same as [std::fs::FileType::is_file].
     pub fn is_file(&self) -> bool {
         (self.0 & libc::S_IFMT) == libc::S_IFREG
     }
 
+    /// Same as [std::fs::FileType::is_symlink].
     pub fn is_symlink(&self) -> bool {
         (self.0 & libc::S_IFMT) == libc::S_IFLNK
     }
 }
 
+/// Same as [std::fs::Metadata].
 #[derive(Clone)]
 pub struct Metadata {
     #[cfg(target_os = "linux")]
@@ -216,70 +242,83 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    /// Same as [std::fs::Metadata::file_type].
     #[cfg(not(target_os = "linux"))]
     pub fn file_type(&self) -> FileType {
         FileType(self.stat.st_mode)
     }
 
+    /// Same as [std::fs::Metadata::file_type].
     #[cfg(target_os = "linux")]
     pub fn file_type(&self) -> FileType {
         FileType(self.stat.stx_mode as libc::mode_t)
     }
 
+    /// Same as [std::fs::Metadata::is_dir].
     pub fn is_dir(&self) -> bool {
         self.file_type().is_dir()
     }
 
+    /// Same as [std::fs::Metadata::is_file].
     pub fn is_file(&self) -> bool {
         self.file_type().is_file()
     }
 
+    /// Same as [std::fs::Metadata::is_symlink].
     pub fn is_symlink(&self) -> bool {
         self.file_type().is_symlink()
     }
 
+    /// Same as [std::fs::Metadata::len].
     #[cfg(not(target_os = "linux"))]
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u64 {
         self.stat.st_size as u64
     }
 
+    /// Same as [std::fs::Metadata::modified].
     #[cfg(not(target_os = "linux"))]
     pub fn modified(&self) -> Result<SystemTime> {
         let d = Duration::new(self.stat.st_mtime as u64, self.stat.st_mtime_nsec as u32);
         Ok(SystemTime::UNIX_EPOCH + d)
     }
 
+    /// Same as [std::fs::Metadata::accessed].
     #[cfg(not(target_os = "linux"))]
     pub fn accessed(&self) -> Result<SystemTime> {
         let d = Duration::new(self.stat.st_atime as u64, self.stat.st_atime_nsec as u32);
         Ok(SystemTime::UNIX_EPOCH + d)
     }
 
+    /// Same as [std::fs::Metadata::created].
     #[cfg(not(target_os = "linux"))]
     pub fn created(&self) -> Result<SystemTime> {
         let d = Duration::new(self.stat.st_birthtime as u64, self.stat.st_birthtime_nsec as u32);
         Ok(SystemTime::UNIX_EPOCH + d)
     }
 
+    /// Same as [std::fs::Metadata::len].
     #[cfg(target_os = "linux")]
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u64 {
         self.stat.stx_size
     }
 
+    /// Same as [std::fs::Metadata::modified].
     #[cfg(target_os = "linux")]
     pub fn modified(&self) -> Result<SystemTime> {
         let d = Duration::new(self.stat.stx_mtime.tv_sec as u64, self.stat.stx_mtime.tv_nsec);
         Ok(SystemTime::UNIX_EPOCH + d)
     }
 
+    /// Same as [std::fs::Metadata::accessed].
     #[cfg(target_os = "linux")]
     pub fn accessed(&self) -> Result<SystemTime> {
         let d = Duration::new(self.stat.stx_mtime.tv_sec as u64, self.stat.stx_mtime.tv_nsec);
         Ok(SystemTime::UNIX_EPOCH + d)
     }
 
+    /// Same as [std::fs::Metadata::created].
     #[cfg(target_os = "linux")]
     pub fn created(&self) -> Result<SystemTime> {
         let d = Duration::new(self.stat.stx_btime.tv_sec as u64, self.stat.stx_btime.tv_nsec);
