@@ -7,7 +7,7 @@ mod suspension;
 
 use std::cell::{Cell, UnsafeCell};
 use std::panic::{self, AssertUnwindSafe};
-use std::{mem, ptr};
+use std::ptr;
 
 use self::context::{Context, Entry};
 use self::stack::StackSize;
@@ -62,15 +62,15 @@ impl ThisThread {
     }
 
     fn resume(context: &Context) {
-        context.switch(Self::context_mut());
+        context.switch(Self::context_mut()).unwrap();
     }
 
     fn suspend(context: &mut Context) {
-        Self::context().switch(context);
+        Self::context().switch(context).unwrap();
     }
 
     fn restore() {
-        Self::context().resume();
+        Self::context().resume().unwrap();
     }
 }
 
@@ -93,7 +93,7 @@ impl Status {
 
 pub(crate) struct Coroutine {
     pub status: Status,
-    context: Box<Context>,
+    context: Option<Box<Context>>,
     f: Option<Box<dyn FnOnce()>>,
 }
 
@@ -101,19 +101,14 @@ unsafe impl Sync for Coroutine {}
 
 impl Coroutine {
     pub fn new(f: Box<dyn FnOnce()>, stack_size: StackSize) -> Box<Coroutine> {
-        #[allow(invalid_value)]
-        let mut co = Box::new(Coroutine {
-            f: Option::Some(f),
-            status: Status::Running,
-            context: unsafe { mem::MaybeUninit::zeroed().assume_init() },
-        });
+        let mut co = Box::new(Coroutine { f: Option::Some(f), status: Status::Running, context: None });
         let ptr = co.as_mut() as *mut Coroutine as usize;
         #[cfg(target_pointer_width = "64")]
         let (low, high) = (ptr as u32, (ptr >> 32) as u32);
         #[cfg(target_pointer_width = "32")]
         let (low, high) = (ptr as u32, 0);
         let entry = Entry { f: Self::main, arg1: low, arg2: high, stack_size };
-        mem::forget(mem::replace(&mut co.context, Context::new(&entry, None)));
+        co.context = Some(Context::new(&entry, None));
         co
     }
 
@@ -138,12 +133,12 @@ impl Coroutine {
     /// Returns whether this coroutine should be resumed again.
     pub fn resume(&mut self) -> Status {
         let _scope = Scope::enter(self);
-        ThisThread::resume(&self.context);
+        ThisThread::resume(self.context.as_ref().unwrap());
         self.status
     }
 
     pub fn suspend(&mut self) {
-        ThisThread::suspend(&mut self.context);
+        ThisThread::suspend(self.context.as_mut().unwrap());
     }
 
     pub fn is_cancelling(&self) -> bool {

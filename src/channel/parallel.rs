@@ -479,7 +479,7 @@ impl<T: Send + 'static> super::shared::Channel<T> for Arc<Channel<T>> {
     }
 
     fn select_recv_permit(&self) -> Option<Permit> {
-        Channel::select_recv_permit(self).map(Permit::into)
+        Channel::select_recv_permit(self)
     }
 
     fn consume_recv_permit(&self) -> Option<T> {

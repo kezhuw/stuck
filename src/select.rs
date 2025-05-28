@@ -219,7 +219,7 @@ pub enum TrySelectError {
 /// Select candidate to read and/or write value in blocking or nonblocking.
 pub trait Select<'a> {
     /// Returns all selectable candidates.
-    fn selectables(&'a self) -> &[Option<&'a dyn Selectable>];
+    fn selectables(&'a self) -> &'a [Option<&'a dyn Selectable>];
 
     /// Tries to select a permit for consumption.
     ///

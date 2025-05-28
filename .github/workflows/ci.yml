@@ -59,7 +59,7 @@ jobs:
           toolchain: stable
           override: true
     - name: Test code
-      run: cargo test -- --nocapture
+      run: cargo test --release -- --nocapture
 
   coverage:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'master')

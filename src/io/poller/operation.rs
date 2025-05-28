@@ -38,6 +38,7 @@ pub enum Operation {
     },
     Stat {
         fd: RawFd,
+        #[allow(dead_code)]
         path: *const libc::c_char,
         metadata: *mut Metadata,
     },
