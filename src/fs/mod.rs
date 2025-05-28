@@ -93,6 +93,11 @@ impl File {
 
     /// Same as [std::fs::File::metadata] except that it does not block scheduling thread.
     pub fn metadata(&self) -> Result<Metadata> {
+        // This constructs an empty string in C.
+        //
+        // If pathname is an empty string (or NULL since Linux 6.11) and the AT_EMPTY_PATH
+        // flag is specified in flags, then the target file is the one referred to by the
+        // file descriptor dirfd.
         let path = [0u8; 1];
         let mut metadata = unsafe { std::mem::zeroed() };
         let operation = Operation::Stat {

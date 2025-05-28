@@ -1,5 +1,7 @@
 use std::{mem, ptr};
 
+use errno::{errno, Errno};
+
 use super::stack::{Stack, StackSize};
 
 #[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
@@ -48,7 +50,7 @@ impl Context {
         let mut ctx = Box::new(Context::empty());
         let rc = unsafe { getcontext(&mut ctx.context) };
         if rc != 0 {
-            panic!("getcontext returns {}", rc);
+            panic!("getcontext gets {}", errno());
         }
         let stack = Stack::alloc(entry.stack_size);
         ctx.context.uc_stack.ss_sp = stack.base() as *mut libc::c_void;
@@ -64,17 +66,17 @@ impl Context {
         ctx
     }
 
-    pub fn resume(&self) {
-        let rc = unsafe { setcontext(&self.context) };
-        if rc != 0 {
-            panic!("setcontext returns {}", rc);
+    pub fn resume(&self) -> Result<(), Errno> {
+        match unsafe { setcontext(&self.context) } {
+            0 => Ok(()),
+            _ => Err(errno()),
         }
     }
 
-    pub fn switch(&self, backup: &mut Context) {
-        let rc = unsafe { swapcontext(&mut backup.context, &self.context) };
-        if rc != 0 {
-            panic!("swapcontext returns {}", rc);
+    pub fn switch(&self, backup: &mut Context) -> Result<(), Errno> {
+        match unsafe { swapcontext(&mut backup.context, &self.context) } {
+            0 => Ok(()),
+            _ => Err(errno()),
         }
     }
 }

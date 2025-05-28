@@ -48,7 +48,7 @@ impl StackSize {
             1.. => Self::global_size() + Self::align_to_page_size(self.size as usize),
             _ => Self::align_to_page_size((-self.size) as usize),
         };
-        size.max(libc::MINSIGSTKSZ)
+        Self::align_to_page_size(size.max(libc::MINSIGSTKSZ))
     }
 
     /// Specifies extra stack size in addition to default.

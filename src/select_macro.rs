@@ -16,7 +16,7 @@
 /// * Expressions to `writer` are only evaluated if that branch is selected.
 /// * `complete` case is run if all selectables are disabled or completed.
 /// * `default` case is run if no selectable is ready, or all selectables are disabled or completed
-/// in absent of `complete`.
+///   in absent of `complete`.
 ///
 /// ## Panics
 /// * Panic when all selectables are disabled or completed and there is no `default` or `complete`.

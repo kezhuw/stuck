@@ -9,13 +9,13 @@
 //!
 //! ### Task
 //! * Use [task::spawn] to spawn new task in running task. The spawned task will run concurrent
-//! with all other tasks.
+//!   with all other tasks.
 //! * Use [task::session] to create facilities to wake waiting tasks.
 //! * Use [task::JoinHandle] to join task result.
 //!
 //! ### Coroutine
 //! * Use [coroutine::spawn] to spawn new coroutine in running task. The spawned coroutine will run
-//! cooperatively with other coroutines belonging to same task.
+//!   cooperatively with other coroutines belonging to same task.
 //! * Use [coroutine::suspension] to create facilities to resume suspending coroutines.
 //! * Use [coroutine::JoinHandle] to join coroutine result.
 //!
