@@ -11,8 +11,8 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - uses: Swatinem/rust-cache@v1
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
     - name: Install latest nightly
       uses: actions-rs/toolchain@v1
       with:
@@ -28,8 +28,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
-    - uses: Swatinem/rust-cache@v1
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
     - name: Install rust stable
       uses: actions-rs/toolchain@v1
       with:
@@ -51,8 +51,8 @@ jobs:
         ]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
-    - uses: Swatinem/rust-cache@v1
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
     - name: Install rust stable
       uses: actions-rs/toolchain@v1
       with:
@@ -71,8 +71,8 @@ jobs:
       image: xd009642/tarpaulin:develop-nightly
       options: --security-opt seccomp=unconfined
     steps:
-    - uses: actions/checkout@v2
-    - uses: Swatinem/rust-cache@v1
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
     - name: Install rust stable
       uses: actions-rs/toolchain@v1
       with:
@@ -97,8 +97,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
-    - uses: Swatinem/rust-cache@v1
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
     - name: Install rust stable
       uses: actions-rs/toolchain@v1
       with:
@@ -113,8 +113,8 @@ jobs:
     needs: [build, test, lint]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - uses: Swatinem/rust-cache@v1
+    - uses: actions/checkout@v4
+    - uses: Swatinem/rust-cache@v2
     - name: install cargo-workspaces to publish workspace
       run: cargo install cargo-workspaces
     - name: publish crate
